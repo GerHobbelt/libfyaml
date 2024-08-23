@@ -150,9 +150,14 @@ AM_CONDITIONAL([HAVE_STATIC], [ test x$HAVE_STATIC = x1 ])
 
 dnl check whether warning flags are supported
 AX_CHECK_COMPILE_FLAG([-Wstringop-overread], , , [-Werror])
-AS_IF([test "x$ax_cv_check_cflags__Werror__wstringop_overread" = x"yes"],
+AS_IF([test "x$ax_cv_check_cflags__Werror__Wstringop_overread" = x"yes"],
       [HAVE_WSTRINGOP_OVERREAD=1], [HAVE_WSTRINGOP_OVERREAD=0])
 AC_DEFINE_UNQUOTED([HAVE_WSTRINGOP_OVERREAD], [$HAVE_WSTRINGOP_OVERREAD], [Define to 1 if -Wstringop-overread is supported])
+
+AX_CHECK_COMPILE_FLAG([-Wstrict-aliasing], , , [-Werror])
+AS_IF([test "x$ax_cv_check_cflags__Werror__Wstrict_aliasing" = x"yes"],
+      [HAVE_WSTRICT_ALIASING=1], [HAVE_WSTRICT_ALIASING=0])
+AC_DEFINE_UNQUOTED([HAVE_WSTRICT_ALIASING], [$HAVE_WSTRICT_ALIASING], [Define to 1 if -Wstrict-aliasing is supported])
 
 dnl Per target optimizations
 AC_ARG_ENABLE([portable-target],
@@ -256,6 +261,14 @@ AC_CHECK_FUNC([qsort_r],
 AC_SUBST(HAVE_QSORT_R)
 AC_DEFINE_UNQUOTED([HAVE_QSORT_R], [$HAVE_QSORT_R], [Define to 1 if you have qsort_r available])
 AM_CONDITIONAL([HAVE_QSORT_R], [ test x$HAVE_QSORT_R = x1 ])
+
+# check if there's a mremap available (macos or BSD's don't have it)
+AC_CHECK_FUNC([mremap],
+	      HAVE_MREMAP=1,
+	      HAVE_MREMAP=0)
+AC_SUBST(HAVE_MREMAP)
+AC_DEFINE_UNQUOTED([HAVE_MREMAP], [$HAVE_MREMAP], [Define to 1 if you have mremap available])
+AM_CONDITIONAL([HAVE_MREMAP], [ test x$HAVE_MREMAP = x1 ])
 
 PKG_CHECK_MODULES(LIBYAML, [ yaml-0.1 ], HAVE_LIBYAML=1, HAVE_LIBYAML=0)
 
