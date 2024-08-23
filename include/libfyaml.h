@@ -2540,6 +2540,29 @@ fy_node_insert(struct fy_node *fyn_to, struct fy_node *fyn_from)
 	FY_EXPORT;
 
 /**
+ * fy_document_delete() - Delete a node from a document
+ *
+ * Delete the given node.
+ * If it's part of a sequence it will be removed from it.
+ * If it's the value of a node key value pair, it will
+ * be removed from the mapping.
+ *
+ * This is an alias for fy_document_insert_at(fyn, NULL)
+ *
+ * Note that it is expected this node is attached to a document.
+ * Do not call this to free a node, because if it's part of
+ * a collection it will not be properly removed.
+ *
+ * @fyn: The node to delete.
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_node_delete(struct fy_node *fyn)
+	FY_EXPORT;
+
+/**
  * fy_document_insert_at() - Insert a node to the given path in the document
  *
  * Insert a node to a given point in the document. If @fyn is NULL then this
@@ -6271,10 +6294,13 @@ enum fy_token_type {
 
 	FYTT_PE_METHOD,		/* path expr method (chained) */
 	FYTT_SE_METHOD,		/* scalar expr method (non chained) */
+
+	FYTT_PE_BANG,		/* ! */
+	FYTT_PE_AT,		/* @ */
 };
 
 /* The number of token types available */
-#define FYTT_COUNT	(FYTT_SE_METHOD+1)
+#define FYTT_COUNT	(FYTT_PE_AT+1)
 
 /**
  * fy_token_type_is_valid() - Check token type validity

@@ -1365,6 +1365,9 @@ int fy_node_mapping_get_pair_index(struct fy_node *fyn, const struct fy_node_pai
 	struct fy_node_pair *fynpi;
 	int i;
 
+	if (!fy_node_is_mapping(fyn))
+		return -1;
+
 	for (i = 0, fynpi = fy_node_pair_list_head(&fyn->mapping); fynpi;
 		fynpi = fy_node_pair_next(&fyn->mapping, fynpi), i++) {
 
@@ -2224,9 +2227,6 @@ int fy_node_insert(struct fy_node *fyn_to, struct fy_node *fyn_from)
 		fyd_error_check(fyd, fyn_parent->type != FYNT_SCALAR, err_out,
 				    "Illegal scalar parent node type");
 
-		fyd_error_check(fyd, fyn_from, err_out,
-				"Illegal NULL source node");
-
 		if (fyn_parent->type == FYNT_MAPPING) {
 			/* find mapping pair that contains the `to` node */
 			for (fynp = fy_node_pair_list_head(&fyn_parent->mapping); fynp;
@@ -2447,6 +2447,11 @@ err_out:
 	rc = -1;
 err_out_rc:
 	return rc;
+}
+
+int fy_node_delete(struct fy_node *fyn)
+{
+	return fy_node_insert(fyn, NULL);
 }
 
 int fy_document_insert_at(struct fy_document *fyd,

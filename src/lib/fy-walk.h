@@ -53,7 +53,11 @@ struct fy_walk_result {
 	struct fy_path_exec *fypx;
 	enum fy_walk_result_type type;
 	union {
-		struct fy_node *fyn;
+		uintptr_t _clean[2];
+		struct {
+			struct fy_node *fyn;
+			struct fy_node *fyn_source;	/* when deep */
+		};
 		double number;
 		char *string;
 		struct fy_walk_result_list refs;
@@ -123,6 +127,9 @@ enum fy_path_expr_type {
 	fpet_logical_or,	/* first non null result set */
 	fpet_logical_and,	/* the last non null result set */
 
+	fpet_select,		/* set selection */
+	fpet_unselect,		/* negation of set selection */
+
 	fpet_eq,		/* equal expression */
 	fpet_neq,		/* not equal */
 	fpet_lt,		/* less than */
@@ -155,6 +162,7 @@ static inline bool fy_path_expr_type_is_valid(enum fy_path_expr_type type)
 	return type >= fpet_root && type < FPET_COUNT;
 }
 
+/* XXX do neg and reg check */
 static inline bool fy_path_expr_type_is_single_result(enum fy_path_expr_type type)
 {
 	return type == fpet_root ||
