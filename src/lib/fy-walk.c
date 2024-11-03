@@ -2973,6 +2973,7 @@ int evaluate_new(struct fy_path_parser *fypp)
 			goto err_out;
 
 		if (!fy_path_expr_type_is_lparen(exprl->type)) {
+			exprl = NULL;
 			ret = evaluate_new(fypp);
 			if (ret)
 				goto err_out;
@@ -2996,6 +2997,7 @@ int evaluate_new(struct fy_path_parser *fypp)
 			if (fy_path_expr_type_is_lparen(exprl->type))
 				break;
 
+			exprl = NULL;
 			ret = evaluate_new(fypp);
 			if (ret)
 				goto err_out;
@@ -4485,7 +4487,7 @@ fy_walk_result_perform_set_op(struct fy_path_exec *fypx, struct fy_walk_result *
 
 			/* if this fails, it means we don't have any output */
 			if (fwrin->fyn == fwrrm->fyn ||
-			    (relpath = fy_node_get_path_relative_to(fwrin->fyn, fwrrm->fyn)) == NULL)
+			    (fwrrm->type == fwrt_node_ref && (relpath = fy_node_get_path_relative_to(fwrin->fyn, fwrrm->fyn)) == NULL))
 				continue;
 #ifdef DEBUG_EXPR
 			fy_diag_diag(fypx->cfg.diag, FYDF_WARNING, "relpath: %s", relpath);
@@ -5004,6 +5006,8 @@ fy_path_expr_execute(struct fy_path_exec *fypx, int level, struct fy_path_expr *
 
 		/* pop the top in either case */
 		assert(input);
+		if (!input)
+			goto out;
 
 		/* only handle inputs of node and refs */
 		if (input->type != fwrt_node_ref && input->type != fwrt_refs) {
@@ -5015,9 +5019,13 @@ fy_path_expr_execute(struct fy_path_exec *fypx, int level, struct fy_path_expr *
 		/* execute the expression */
 		exprn = fy_path_expr_list_head(&expr->children);
 		assert(exprn);
+		if (!exprn)
+			goto out;
 
 		fwrt = fy_walk_result_clone(input);
 		assert(fwrt);
+		if (!fwrt)
+			goto out;
 
 		fwrn = fy_path_expr_execute(fypx, level + 1, exprn, fwrt, expr->type);
 
