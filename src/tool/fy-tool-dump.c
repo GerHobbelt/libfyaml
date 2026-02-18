@@ -14,18 +14,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
-#include <getopt.h>
 #include <ctype.h>
-#include <unistd.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <regex.h>
 #include <stdalign.h>
 #include <inttypes.h>
 #include <float.h>
 #include <limits.h>
 #include <math.h>
+#include <errno.h>
+#include <fcntl.h>
 
 #include <libfyaml.h>
 
@@ -91,7 +87,7 @@ void print_escaped(const char *str, size_t length)
 		case '\v':
 			printf("\\v");
 			break;
-		case '\e':
+		case '\x1b':
 			printf("\\e");
 			break;
 		case 0x85:
@@ -130,14 +126,13 @@ void dump_token_comments(struct fy_token *fyt, bool colorize, const char *banner
 		[fycp_bottom] = "bottom",
 	};
 	enum fy_comment_placement placement;
-	char buf[4096];
 	const char *str;
 
 	if (!fyt)
 		return;
 
 	for (placement = fycp_top; placement < fycp_max; placement++) {
-		str = fy_token_get_comment(fyt, buf, sizeof(buf), placement);
+		str = fy_token_get_comment(fyt, placement);
 		if (!str)
 			continue;
 		fputs("\n", stdout);

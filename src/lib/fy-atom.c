@@ -32,7 +32,7 @@ const char *fy_atom_data(const struct fy_atom *atom)
 	if (!atom)
 		return NULL;
 
-	return fy_input_start(atom->fyi) + atom->start_mark.input_pos;
+	return (const char *)fy_input_start(atom->fyi) + atom->start_mark.input_pos;
 }
 
 
@@ -52,21 +52,20 @@ struct fy_atom *fy_reader_fill_atom(struct fy_reader *fyr, int advance, struct f
 
 int fy_reader_advance_mark(struct fy_reader *fyr, int advance, struct fy_mark *m)
 {
-	int i, c, tabsize;
+	int c, tabsize, w;
 	bool is_line_break;
 
 	tabsize = fy_reader_tabsize(fyr);
-	i = 0;
 	while (advance-- > 0) {
-		c = fy_reader_peek_at(fyr, i++);
+		c = fy_reader_peek_at_offset_width(fyr, m->input_pos, &w);
 		if (c == -1)
 			return -1;
 		m->input_pos += fy_utf8_width(c);
 
 		/* first check for CR/LF */
-		if (c == '\r' && fy_reader_peek_at(fyr, i) == '\n') {
+		if (c == '\r' &&
+			fy_reader_peek_at_offset(fyr, m->input_pos + (size_t)w) == '\n') {
 			m->input_pos++;
-			i++;
 			is_line_break = true;
 		} else if (fy_reader_is_lb(fyr, c))
 			is_line_break = true;
@@ -232,25 +231,6 @@ _fy_atom_iter_add_chunk_copy(struct fy_atom_iter *iter, const char *str, size_t 
 	return 0;
 }
 
-/* keep it around without a warning even though it's unused */
-static int
-_fy_atom_iter_add_utf8(struct fy_atom_iter *iter, int c)
-	__attribute__((__unused__));
-
-static int
-_fy_atom_iter_add_utf8(struct fy_atom_iter *iter, int c)
-{
-	char buf[FY_UTF8_FORMAT_BUFMIN];
-	char *e;
-
-	/* only fails if invalid utf8 */
-	e = fy_utf8_put(buf, sizeof(buf), c);
-	if (!e)
-		return -1;
-
-	return _fy_atom_iter_add_chunk_copy(iter, buf, e - buf);
-}
-
 /* optimized linebreaks */
 static int
 _fy_atom_iter_add_lb(struct fy_atom_iter *iter, int c)
@@ -276,7 +256,6 @@ _fy_atom_iter_add_lb(struct fy_atom_iter *iter, int c)
 #ifndef DEBUG_CHUNK
 #define fy_atom_iter_add_chunk _fy_atom_iter_add_chunk
 #define fy_atom_iter_add_chunk_copy _fy_atom_iter_add_chunk_copy
-#define fy_atom_iter_add_utf8 _fy_atom_iter_add_utf8
 #define fy_atom_iter_add_lb _fy_atom_iter_add_lb
 #else
 #define fy_atom_iter_add_chunk(_iter, _str, _len) \
@@ -313,12 +292,6 @@ _fy_atom_iter_add_lb(struct fy_atom_iter *iter, int c)
 		} \
 		__ret; \
 	})
-#define fy_atom_iter_add_utf8(_iter, _c) \
-	({ \
-		int __c = (_c); \
-		fprintf(stderr, "%s:%d utf8 %d\n", __func__, __LINE__, __c); \
-		_fy_atom_iter_add_utf8((_iter), (_c)); \
-	})
 #define fy_atom_iter_add_lb(_iter, _c) \
 	({ \
 		int __c = (_c); \
@@ -333,7 +306,7 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 {
 	const struct fy_atom *atom = iter->atom;
 	const char *s, *e, *ss;
-	int col, c, w, ts, cws, advws;
+	int col, c, cn, w, wn, ts, cws, advws;
 	bool last_was_ws, is_block;
 	int lastc;
 
@@ -384,7 +357,7 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 
 	last_was_ws = false;
 
-	ts = atom->tabsize ? : 8;	/* pick it up from the atom (if there is) */
+	ts = atom->tabsize ? atom->tabsize : 8;	/* pick it up from the atom (if there is) */
 
 	/* consecutive whitespace */
 	cws = 0;
@@ -445,6 +418,17 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 				li->nws_end = ss;
 				last_was_ws = true;
 			}
+
+#if defined(DEBUG_CHUNK)
+			/* special CR/LF handling */
+			if (c == '\r') {
+				cn = ss < e ? fy_utf8_get(ss + w, (e - ss - w), &wn) : FYUG_EOF;
+				if (cn == '\n') {
+					ss += w;
+					w = wn;
+				}
+			}
+#endif
 
 		} else if (fy_is_space(c)) {
 
@@ -605,6 +589,17 @@ do_nws:
 			li->trailing_breaks_ws = true;
 
 		if (fy_is_lb_m(c, atom->lb_mode)) {
+			/* special CRLF handling */
+			if (c == '\r') {
+				cn = ss < e ? fy_utf8_get(ss + w, (e - ss - w), &wn) : FYUG_EOF;
+				if (cn == '\n') {
+#if defined(DEBUG_CHUNK)
+					fprintf(stderr, "%s:%d trailing CRLF\n", __FILE__, __LINE__);
+#endif
+					ss += w;
+					w = wn;
+				}
+			}
 			li->trailing_breaks++;
 			col = 0;
 		} else {
@@ -654,7 +649,7 @@ void fy_atom_iter_start(const struct fy_atom *atom, struct fy_atom_iter *iter)
 	iter->chomp = atom->increment;
 
 	/* default tab size is 8 */
-	iter->tabsize = atom->tabsize ? : 8;
+	iter->tabsize = atom->tabsize ? atom->tabsize : 8;
 
 	memset(iter->li, 0, sizeof(iter->li));
 	li = &iter->li[1];
@@ -829,13 +824,13 @@ fy_atom_iter_format(struct fy_atom_iter *iter)
 	const struct fy_atom *atom = iter->atom;
 	const struct fy_atom_iter_line_info *li;
 	const char *s, *e, *t;
-	int value, code_length, rlen, ret;
+	int value, code_length, ret;
 	uint8_t code[4], *tt;
 	int j, pending_nl;
 	int *pending_lb = NULL, *pending_lb_new = NULL;
 	int pending_lb_size = 0;
 	enum fy_utf8_escape esc_mode;
-	size_t i;
+	size_t rlen, i;
 
 	/* done? */
 	li = fy_atom_iter_line(iter);
@@ -1174,7 +1169,7 @@ fy_atom_iter_chunk_next(struct fy_atom_iter *iter, const struct fy_iter_chunk *c
 	return ic;
 }
 
-int fy_atom_format_text_length(struct fy_atom *atom)
+ssize_t fy_atom_format_text_length(struct fy_atom *atom)
 {
 	struct fy_atom_iter iter;
 	const struct fy_iter_chunk *ic;
@@ -1185,7 +1180,7 @@ int fy_atom_format_text_length(struct fy_atom *atom)
 		return -1;
 
 	if (atom->storage_hint_valid)
-		return atom->storage_hint;
+		return (ssize_t)atom->storage_hint;
 
 	len = 0;
 	fy_atom_iter_start(atom, &iter);
@@ -1195,7 +1190,7 @@ int fy_atom_format_text_length(struct fy_atom *atom)
 	fy_atom_iter_finish(&iter);
 
 	/* something funky going on here */
-	if ((int)len < 0)
+	if ((ssize_t)len < 0)
 		return -1;
 
 	if (ret != 0)
@@ -1203,7 +1198,7 @@ int fy_atom_format_text_length(struct fy_atom *atom)
 
 	atom->storage_hint = (size_t)len;
 	atom->storage_hint_valid = true;
-	return (int)len;
+	return (ssize_t)len;
 }
 
 const char *fy_atom_format_text(struct fy_atom *atom, char *buf, size_t maxsz)
@@ -1241,8 +1236,8 @@ int fy_atom_format_utf8_length(struct fy_atom *atom)
 	struct fy_atom_iter iter;
 	const struct fy_iter_chunk *ic;
 	const char *s, *e;
-	size_t len;
-	int ret, rem, run, w;
+	size_t len, run, rem;
+	int ret, w;
 
 	if (!atom)
 		return -1;
@@ -1256,7 +1251,7 @@ int fy_atom_format_utf8_length(struct fy_atom *atom)
 		e = s + ic->len;
 
 		/* add the remainder */
-		run = (e - s) > rem ? rem : (e - s);
+		run = (size_t)(e - s) > rem ? rem : (size_t)(e - s);
 		s += run;
 
 		/* count utf8 characters */
@@ -1753,6 +1748,7 @@ fy_atom_raw_line_iter_next(struct fy_atom_raw_line_iter *iter)
 	if (l->lineno > 0 && iter->rs >= iter->ae)
 		return NULL;
 
+	c = -1;
 	while (s > iter->is) {
 		c = fy_utf8_get_right(iter->is, (size_t)(s - iter->is), &w);
 		if (c <= 0 || fy_is_lb_m(c, iter->atom->lb_mode))
@@ -1849,6 +1845,7 @@ fy_atom_raw_line_iter_next(struct fy_atom_raw_line_iter *iter)
 	l->line_count = count;
 
 	if (fy_is_lb_m(c, iter->atom->lb_mode)) {
+
 		s += w;
 		/* special case for MSDOS */
 		if (c == '\r' && (s < iter->ie && s[1] == '\n'))
@@ -1894,4 +1891,40 @@ void fy_atom_raw_line_iter_start(const struct fy_atom *atom,
 void fy_atom_raw_line_iter_finish(struct fy_atom_raw_line_iter *iter)
 {
 	/* nothing */
+}
+
+/* returns the line of the atom, marking exactly where the atom is */
+const char *fy_atom_lines_containing(struct fy_atom *atom, size_t *lenp)
+{
+	const struct fy_raw_line *l, *ln;
+	struct fy_atom_raw_line_iter iter;
+	bool first_line, last_line;
+	const char *start, *end;
+
+	if (!atom || !lenp) {
+		if (lenp)
+			*lenp = 0;
+		return NULL;
+	}
+
+	start = end = NULL;
+
+	fy_atom_raw_line_iter_start(atom, &iter);
+	l = fy_atom_raw_line_iter_next(&iter);
+	for (; l != NULL; l = ln) {
+		/* get the next too */
+		ln = fy_atom_raw_line_iter_next(&iter);
+
+		first_line = l->lineno <= 1;
+		last_line = ln == NULL;
+
+		if (first_line)
+			start = l->line_start;
+		if (last_line)
+			end = l->line_start + l->line_count;
+	}
+	fy_atom_raw_line_iter_finish(&iter);
+
+	*lenp = end - start;
+	return start;
 }

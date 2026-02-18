@@ -106,18 +106,18 @@ struct fy_allocator *fy_linear_create(struct fy_allocator *parent, int parent_ta
 		buf = cfg->buf;
 
 	s = buf;
-	e = s + cfg->size;
+	e = (char *)s + cfg->size;
 
 	s = fy_ptr_align(s, _Alignof(struct fy_linear_allocator));
-	if ((size_t)(e - s) < sizeof(*la))
+	if ((size_t)((char *)e - (char *)s) < sizeof(*la))
 		goto err_out;
 
 	la = s;
-	s += sizeof(*la);
+	s = (char *)s + sizeof(*la);
 
 	memset(&newcfg, 0, sizeof(newcfg));
 	newcfg.buf = s;
-	newcfg.size = (size_t)(e - s);
+	newcfg.size = (size_t)((char *)e - (char *)s);
 
 	rc = fy_linear_setup(&la->a, parent, parent_tag, &newcfg);
 	if (rc)
@@ -177,8 +177,8 @@ static void *fy_linear_alloc(struct fy_allocator *a, int tag, size_t size, size_
 	/* atomically update the pointer */
 	do {
 		next = fy_atomic_load(&la->next);
-		s = fy_ptr_align(la->start + next, align);
-		new_next = (s + size) - la->start;
+		s = fy_ptr_align((char *)la->start + next, align);
+		new_next = (size_t)(((char *)s + size) - (char *)la->start);
 		/* handle both overflow and underflow */
 		if (new_next > la->cfg.size)
 			goto err_out;
@@ -239,7 +239,6 @@ static const void *fy_linear_storev(struct fy_allocator *a, int tag,
 
 	if (a->flags & FYAF_KEEP_STATS) {
 		la = container_of(a, struct fy_linear_allocator, a);
-
 		fy_atomic_fetch_add(&la->stores, 1);
 		fy_atomic_fetch_add(&la->stores, size);
 	}
@@ -368,7 +367,8 @@ static bool fy_linear_contains(struct fy_allocator *a, int tag, const void *ptr)
 	struct fy_linear_allocator *la;
 
 	la = container_of(a, struct fy_linear_allocator, a);
-	return ptr >= la->start && ptr < (la->start + la->cfg.size);
+	return (char *)ptr >= (char *)la->start &&
+	       (char *)ptr < ((char *)la->start + la->cfg.size);
 }
 
 const struct fy_allocator_ops fy_linear_allocator_ops = {

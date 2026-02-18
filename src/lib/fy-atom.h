@@ -144,7 +144,7 @@ static inline bool fy_atom_is_flow_ws(struct fy_atom *handle, int c)
 	return fy_is_flow_ws_m(c, fy_atom_flow_ws_mode(handle));
 }
 
-int fy_atom_format_text_length(struct fy_atom *atom);
+ssize_t fy_atom_format_text_length(struct fy_atom *atom);
 const char *fy_atom_format_text(struct fy_atom *atom, char *buf, size_t maxsz);
 
 int fy_atom_format_utf8_length(struct fy_atom *atom);
@@ -296,5 +296,8 @@ void fy_atom_raw_line_iter_finish(struct fy_atom_raw_line_iter *iter);
 
 const struct fy_raw_line *
 fy_atom_raw_line_iter_next(struct fy_atom_raw_line_iter *iter);
+
+const char *
+fy_atom_lines_containing(struct fy_atom *atom, size_t *lenp);
 
 #endif

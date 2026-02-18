@@ -11,13 +11,10 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <stdarg.h>
-#include <unistd.h>
 #include <ctype.h>
 
 #include <libfyaml.h>
@@ -36,7 +33,7 @@ int fy_composer_vdiag(struct fy_composer *fyc, unsigned int flags,
 		return -1;
 
 	/* perform the enable tests early to avoid the overhead */
-	if (((flags & FYDF_LEVEL_MASK) >> FYDF_LEVEL_SHIFT) < fyc->cfg.diag->cfg.level)
+	if ((int)((flags & FYDF_LEVEL_MASK) >> FYDF_LEVEL_SHIFT) < (int)fyc->cfg.diag->cfg.level)
 		return 0;
 
 	/* fill in fy_diag_ctx */

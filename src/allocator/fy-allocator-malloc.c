@@ -14,12 +14,13 @@
 #include <stdalign.h>
 #include <time.h>
 #include <inttypes.h>
-
 #include <stdio.h>
 
 /* for container_of */
 #include "fy-list.h"
 #include "fy-utils.h"
+#include "fy-align.h"
+#include "fy-win32.h"
 
 #include "fy-allocator-malloc.h"
 
@@ -69,7 +70,7 @@ static void fy_malloc_tag_cleanup(struct fy_malloc_allocator *ma, struct fy_mall
 
 	/* cleanup should happen from a single thread */
 	while ((me = fy_malloc_entry_list_pop(&mt->entries)) != NULL)
-		free(me->mem);
+		fy_align_free(me->mem);
 }
 
 static void fy_malloc_cleanup(struct fy_allocator *a)
@@ -91,8 +92,8 @@ static void fy_malloc_cleanup(struct fy_allocator *a)
 		fy_malloc_tag_cleanup(ma, mt);
 	}
 
-	fy_parent_allocator_free(&ma->a, ma->ids);
-	fy_parent_allocator_free(&ma->a, ma->tags);
+	fy_parent_allocator_free(&ma->a, (void *)ma->ids);
+	fy_parent_allocator_free(&ma->a, (void *)ma->tags);
 }
 
 static int fy_malloc_setup(struct fy_allocator *a, struct fy_allocator *parent, int parent_tag, const void *data)
@@ -214,17 +215,16 @@ static void *fy_malloc_tag_alloc(struct fy_malloc_allocator *ma, struct fy_mallo
 {
 	struct fy_malloc_entry *me;
 	size_t me_offset, max_align;
-	int r;
 	void *mem;
 
 	me_offset = fy_size_t_align(size, _Alignof(struct fy_malloc_entry));
 	max_align = align > _Alignof(struct fy_malloc_entry) ? align : _Alignof(struct fy_malloc_entry);
 
-	r = posix_memalign(&mem, max_align, me_offset + sizeof(*me));
-	if (r)
+	mem = fy_align_alloc(max_align, me_offset + sizeof(*me));
+	if (!mem)
 		return NULL;
 
-	me = mem + me_offset;
+	me = (void *)((char *)mem + me_offset);
 
 	me->size = size;
 	fy_malloc_tag_list_lock(mt);
@@ -245,7 +245,7 @@ static void fy_malloc_tag_free(struct fy_malloc_allocator *ma, struct fy_malloc_
 	fy_malloc_entry_list_del(&mt->entries, me);
 	fy_malloc_tag_list_unlock(mt);
 
-	free(me->mem);
+	fy_align_free(me->mem);
 }
 
 static void *fy_malloc_alloc(struct fy_allocator *a, int tag, size_t size, size_t align)
@@ -486,7 +486,7 @@ static int fy_malloc_set_tag_count(struct fy_allocator *a, unsigned int count)
 	}
 	if (ma->ids != ids) {
 		ma->ids = ids;
-		fy_parent_allocator_free(&ma->a, ma->ids);
+		fy_parent_allocator_free(&ma->a, (void *)ma->ids);
 	}
 	ma->tag_count = tag_count;
 	ma->tag_id_count = tag_id_count;
@@ -494,7 +494,7 @@ static int fy_malloc_set_tag_count(struct fy_allocator *a, unsigned int count)
 
 err_out:
 	fy_parent_allocator_free(&ma->a, tags);
-	fy_parent_allocator_free(&ma->a, ids);
+	fy_parent_allocator_free(&ma->a, (void *)ids);
 	return -1;
 }
 
@@ -517,7 +517,7 @@ static void fy_malloc_reset_tag(struct fy_allocator *a, int tag)
 
 	/* no lock, reset is single thread only */
 	while ((me = fy_malloc_entry_list_pop(&mt->entries)) != NULL)
-		free(me->mem);
+		fy_align_free(me);
 }
 
 static struct fy_allocator_info *
@@ -682,7 +682,8 @@ static bool fy_malloc_contains(struct fy_allocator *a, int tag, const void *ptr)
 		for (me = fy_malloc_entry_list_head(&mt->entries); me;
 		     me = fy_malloc_entry_next(&mt->entries, me)) {
 
-			if (ptr >= (void *)me->mem && ptr < (void *)me->mem + me->size) {
+			if (ptr >= (void *)me->mem &&
+			    ptr < (void *)((char *)me->mem + me->size)) {
 				fy_malloc_tag_list_unlock(mt);
 				return true;
 			}

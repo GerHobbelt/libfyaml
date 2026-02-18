@@ -15,13 +15,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <ctype.h>
+
+#ifndef _WIN32
 #include <termios.h>
 #include <unistd.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <ctype.h>
+#endif
 
+#include "fy-win32.h"
 #include "fy-utf8.h"
 #include "fy-ctype.h"
 #include "fy-utils.h"
@@ -298,14 +302,14 @@ int fy_tag_handle_length(const char *data, size_t len)
 
 	c = fy_utf8_get(s, e - s, &w);
 	if (c == -1)
-		return len;
+		return (int)len;
 
 	if (fy_is_ws(c))
-		return s - data;
+		return (int)(s - data);
 	/* if first character is !, empty handle */
 	if (c == '!') {
 		s += w;
-		return s - data;
+		return (int)(s - data);
 	}
 	if (!fy_is_first_alpha(c))
 		return -1;
@@ -315,7 +319,7 @@ int fy_tag_handle_length(const char *data, size_t len)
 	if (c == '!')
 		s += w;
 
-	return s - data;
+	return (int)(s - data);
 }
 
 int fy_tag_uri_length(const char *data, size_t len)
@@ -332,7 +336,7 @@ int fy_tag_uri_length(const char *data, size_t len)
 			break;
 		s += w;
 	}
-	uri_length = s - data;
+	uri_length = (int)(s - data);
 
 	if (!fy_tag_uri_is_valid(data, uri_length))
 		return -1;
@@ -404,7 +408,10 @@ int fy_tag_scan(const char *data, size_t len, struct fy_tag_scan_info *info)
 }
 
 /* simple terminal methods; mainly for getting size of terminal */
-int fy_term_set_raw(int fd, struct termios *oldt)
+/* These functions are not available on Windows */
+#ifndef _WIN32
+static int
+fy_term_set_raw(int fd, struct termios *oldt)
 {
 	struct termios newt, t;
 	int ret;
@@ -431,7 +438,8 @@ int fy_term_set_raw(int fd, struct termios *oldt)
 	return 0;
 }
 
-int fy_term_restore(int fd, const struct termios *oldt)
+static int
+fy_term_restore(int fd, const struct termios *oldt)
 {
 	/* must be a terminal */
 	if (!isatty(fd))
@@ -440,7 +448,8 @@ int fy_term_restore(int fd, const struct termios *oldt)
 	return tcsetattr(fd, TCSANOW, oldt);
 }
 
-ssize_t fy_term_write(int fd, const void *data, size_t count)
+static ssize_t
+fy_term_write(int fd, const void *data, size_t count)
 {
 	ssize_t wrn, r;
 
@@ -463,7 +472,8 @@ ssize_t fy_term_write(int fd, const void *data, size_t count)
 	return wrn > 0 ? wrn : r;
 }
 
-int fy_term_safe_write(int fd, const void *data, size_t count)
+static int
+fy_term_safe_write(int fd, const void *data, size_t count)
 {
 	if (!isatty(fd))
 		return -1;
@@ -471,7 +481,8 @@ int fy_term_safe_write(int fd, const void *data, size_t count)
 	return fy_term_write(fd, data, count) == (ssize_t)count ? 0 : -1;
 }
 
-ssize_t fy_term_read(int fd, void *data, size_t count, int timeout_us)
+static ssize_t
+fy_term_read(int fd, void *data, size_t count, int timeout_us)
 {
 	ssize_t rdn, r;
 	struct timeval tv, tvto, *tvp;
@@ -523,7 +534,8 @@ ssize_t fy_term_read(int fd, void *data, size_t count, int timeout_us)
 	return rdn > 0 ? rdn : r;
 }
 
-ssize_t fy_term_read_escape(int fd, void *buf, size_t count)
+static ssize_t
+fy_term_read_escape(int fd, void *buf, size_t count)
 {
 	char *p;
 	int r, rdn;
@@ -572,7 +584,8 @@ ssize_t fy_term_read_escape(int fd, void *buf, size_t count)
 	return rdn;
 }
 
-int fy_term_query_size_raw(int fd, int *rows, int *cols)
+static int
+fy_term_query_size_raw(int fd, int *rows, int *cols)
 {
 	char buf[32];
 	char *s, *e;
@@ -638,6 +651,27 @@ int fy_term_query_size(int fd, int *rows, int *cols)
 
 	return ret;
 }
+
+#else /* _WIN32 */
+
+int fy_term_query_size(int fd, int *rows, int *cols)
+{
+	CONSOLE_SCREEN_BUFFER_INFO csbi;
+	HANDLE h;
+
+	if (fd != _fileno(stdout) && fd != _fileno(stderr))
+		return -1;
+
+	h = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (!GetConsoleScreenBufferInfo(h, &csbi))
+		return -1;
+
+	*cols = (int)(csbi.srWindow.Right  - csbi.srWindow.Left + 1);
+	*rows = (int)(csbi.srWindow.Bottom - csbi.srWindow.Top  + 1);
+	return 0;
+}
+
+#endif /* !_WIN32 - end of terminal functions */
 
 int fy_comment_iter_begin(const char *comment, size_t size, struct fy_comment_iter *iter)
 {
@@ -734,6 +768,7 @@ void fy_comment_iter_end(struct fy_comment_iter *iter)
 
 char *fy_get_cooked_comment(const char *raw_comment, size_t size)
 {
+	struct fy_memstream *fyms = NULL;
 	struct fy_comment_iter iter;
 	FILE *fp;
 	char *buf;
@@ -744,8 +779,8 @@ char *fy_get_cooked_comment(const char *raw_comment, size_t size)
 	if (!raw_comment)
 		return NULL;
 
-	fp = open_memstream(&buf, &len);
-	if (!fp)
+	fyms = fy_memstream_open(&fp);
+	if (!fyms)
 		return NULL;
 
 	ret = 0;
@@ -757,8 +792,7 @@ char *fy_get_cooked_comment(const char *raw_comment, size_t size)
 	}
 	fy_comment_iter_end(&iter);
 
-	fclose(fp);
-
+	buf = fy_memstream_close(fyms, &len);
 	if (ret < 0) {
 		if (buf)
 			free(buf);
@@ -897,4 +931,70 @@ uint64_t fy_iovec_xxhash64(const struct iovec *iov, int iovcnt)
 	if (!hash)
 		hash++;
 	return hash;
+}
+
+struct fy_memstream {
+	FILE *fp;
+	char *buf;
+	size_t size;
+};
+
+struct fy_memstream *fy_memstream_open(FILE **fpp)
+{
+	struct fy_memstream *fyms;
+
+	if (!fpp)
+		return NULL;
+
+	*fpp = NULL;
+
+	fyms = malloc(sizeof(*fyms));
+	if (!fyms)
+		return NULL;
+	memset(fyms, 0, sizeof(*fyms));
+#if !defined(_WIN32)
+	fyms->fp = open_memstream(&fyms->buf, &fyms->size);
+#else
+	fyms->fp = tmpfile();
+#endif
+	if (!fyms->fp) {
+		free(fyms);
+		return NULL;
+	}
+	*fpp = fyms->fp;
+	return fyms;
+}
+
+char *fy_memstream_close(struct fy_memstream *fyms, size_t *sizep)
+{
+	char *buf;
+#if defined(_WIN32)
+	long sz;
+#endif
+
+	if (!fyms) {
+		*sizep = 0;
+		return NULL;
+	}
+
+#if defined(_WIN32)
+	if (fyms->fp && fflush(fyms->fp) == 0 &&
+	    (sz = ftell(fyms->fp)) >= 0 &&
+	    (fyms->buf = malloc((size_t)sz + 1)) != NULL) {
+		rewind(fyms->fp);
+		fyms->size = fread(fyms->buf, 1, (size_t)sz, fyms->fp);
+		fyms->buf[fyms->size] = '\0';
+	}
+#endif
+
+	if (fyms->fp)
+		fclose(fyms->fp);
+
+	/* the buffer is updated only after close */
+	buf = fyms->buf;
+	*sizep = buf ? fyms->size : 0;
+
+	free(fyms);
+
+	return buf;
 }

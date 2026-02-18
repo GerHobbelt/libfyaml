@@ -17,10 +17,13 @@
 #include <stdbool.h>
 #include <assert.h>
 
+#ifndef _WIN32
 #include <sys/uio.h>
+#endif
 
 #include "fy-typelist.h"
 #include "fy-utils.h"
+#include "fy-win32.h"
 
 #include <libfyaml.h>
 
@@ -49,7 +52,7 @@ struct fy_allocator_ops {
 	void (*trim_tag)(struct fy_allocator *a, int tag);
 	void (*reset_tag)(struct fy_allocator *a, int tag);
 	struct fy_allocator_info *(*get_info)(struct fy_allocator *a, int tag);
-	unsigned int (*get_caps)(struct fy_allocator *a);	/* Get capability flags (FYACF_*) */
+	enum fy_allocator_cap_flags (*get_caps)(struct fy_allocator *a);	/* Get capability flags (FYACF_*) */
 	bool (*contains)(struct fy_allocator *a, int tag, const void *ptr);
 };
 

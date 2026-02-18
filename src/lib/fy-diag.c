@@ -11,13 +11,10 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <stdarg.h>
-#include <unistd.h>
 #include <ctype.h>
 
 #include <libfyaml.h>
@@ -26,7 +23,6 @@
 
 #include "fy-parse.h"
 #include "fy-input.h"
-
 
 static const char *error_type_txt[] = {
 	[FYET_DEBUG]   = "debug",
@@ -254,7 +250,7 @@ void fy_diag_destroy(struct fy_diag *diag)
 	while ((errp = fy_diag_errorp_list_pop(&diag->errors)) != NULL)
 		fy_diag_errorp_free(errp);
 
-	return fy_diag_unref(diag);
+	fy_diag_unref(diag);
 }
 
 bool fy_diag_got_error(struct fy_diag *diag)
@@ -295,6 +291,14 @@ void fy_diag_set_collect_errors(struct fy_diag *diag, bool collect_errors)
 		while ((errp = fy_diag_errorp_list_pop(&diag->errors)) != NULL)
 			fy_diag_errorp_free(errp);
 	}
+}
+
+bool fy_diag_get_collect_errors(struct fy_diag *diag)
+{
+	if (!diag || diag->destroyed)
+		return false;
+
+	return diag->collect_errors;
 }
 
 struct fy_diag_error *fy_diag_errors_iterate(struct fy_diag *diag, void **prevp)
@@ -521,13 +525,13 @@ int fy_vdiag(struct fy_diag *diag, const struct fy_diag_ctx *fydc,
 	}
 
 	rc = fy_diag_printf(diag, "%s" "%*s" "%*s" "%*s" "%*s" "%s" "%s\n",
-			color_start ? : "",
-			source    ? diag->cfg.source_width : 0, source ? : "",
-			position  ? diag->cfg.position_width : 0, position ? : "",
-			typestr   ? diag->cfg.type_width : 0, typestr ? : "",
-			modulestr ? diag->cfg.module_width : 0, modulestr ? : "",
+			color_start ? color_start : "",
+			source    ? diag->cfg.source_width : 0, source ? source : "",
+			position  ? diag->cfg.position_width : 0, position ? position : "",
+			typestr   ? diag->cfg.type_width : 0, typestr ? typestr : "",
+			modulestr ? diag->cfg.module_width : 0, modulestr ? modulestr : "",
 			msg,
-			color_end ? : "");
+			color_end ? color_end : "");
 
 	if (rc > 0)
 		rc++;
@@ -792,14 +796,14 @@ void fy_diag_error_atom_display(struct fy_diag *diag, enum fy_error_type type, s
 				}
 			}
 			display = rowbuf;
-			display_len = rbs - rowbuf;
+			display_len = (int)(rbs - rowbuf);
 
 			tilde_start = content_start_col - line_shift;
 			tilde_width = content_width;
 			if (tilde_start + tilde_width > cols)
 				tilde_width = cols - tilde_start;
 			if ((size_t)tilde_width >= rowbufsz)
-				tilde_width = rowbufsz - 1;	/* guard */
+				tilde_width = (int)(rowbufsz - 1);	/* guard */
 			tilde_width_m1 = tilde_width > 0 ? (tilde_width - 1) : 0;
 
 			/* output the line */
@@ -869,7 +873,7 @@ void fy_diag_vreport(struct fy_diag *diag,
 
 	if (!diag->collect_errors) {
 		fy_diag_printf(diag, "%s" "%s%s: %s" "%s\n",
-			name_str ? : "",
+			name_str ? name_str : "",
 			color_start, fy_error_type_to_string(fydrc->type), color_end,
 			msg_str);
 

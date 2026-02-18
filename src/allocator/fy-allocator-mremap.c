@@ -15,24 +15,27 @@
 #include <time.h>
 #include <inttypes.h>
 #include <math.h>
+#include <stdio.h>
+
+#ifndef _WIN32
 #include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 #ifdef HAVE_ALLOCA_H
 #include <alloca.h>
 #endif
 
-
-#include <stdio.h>
-
 /* for container_of */
 #include "fy-list.h"
 #include "fy-utils.h"
+#include "fy-win32.h"
 
 #include "fy-allocator-mremap.h"
 
 // #define DEBUG_ARENA
 
-#if defined(__NetBSD__)
+#if defined(__NetBSD__) || defined(_WIN32)
 #define DISABLE_MREMAP
 #endif
 
@@ -100,7 +103,8 @@ fy_mremap_arena_create(struct fy_mremap_allocator *mra, struct fy_mremap_tag *mr
 	if (size < mra->minimum_arena_size)
 		size = mra->minimum_arena_size;
 
-	size_page_align = fy_mremap_useable_arena_size(mra, size);
+	/* need to be aligned to page boundary */
+	size_page_align = fy_size_t_align(fy_mremap_useable_arena_size(mra, size), mra->pagesz);
 	switch (mra->arena_type) {
 	case FYMRAT_MALLOC:
 		mran = malloc(size_page_align);
@@ -124,7 +128,7 @@ fy_mremap_arena_create(struct fy_mremap_allocator *mra, struct fy_mremap_tag *mr
 			/* either it fails, or it moves we handle it */
 #else
 			/* we don't shrink, we just unmap over the limit  */
-			rc = munmap(mem + size_page_align, balloon_size - size_page_align);
+			rc = munmap((char *)mem + size_page_align, balloon_size - size_page_align);
 			if (rc) {
 #ifdef DEBUG_ARENA
 				fprintf(stderr, "%s: failed to unmap for shink\n", __func__);
@@ -227,8 +231,8 @@ static int fy_mremap_arena_grow(struct fy_mremap_allocator *mra, struct fy_mrema
 		assert(mem == mran);
 #else
 		/* do a mmap right after the one we have, if it succeeds we have grown */
-		mem = mmap((void *)mran + mran->size, mran->size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-		if (mem != (void *)mran + mran->size) {
+		mem = mmap((char *)mran + mran->size, mran->size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+		if (mem != (char *)mran + mran->size) {
 			if (mem != MAP_FAILED)
 				munmap(mem, mran->size);
 			break;
@@ -283,7 +287,7 @@ static int fy_mremap_arena_trim(struct fy_mremap_allocator *mra, struct fy_mrema
 			return -1;
 #else
 		/* we don't shrink, we just unmap over the limit  */
-		rc = munmap((void *)mran + new_size, mran->size - new_size);
+		rc = munmap((char *)mran + new_size, mran->size - new_size);
 		if (rc)
 			return -1;
 #endif
@@ -532,7 +536,7 @@ do_alloc:
 #endif
 			goto again;
 		}
-		ptr = (void *)mran + data_pos;
+		ptr = (void *)((char *)mran + data_pos);
 	} while (!fy_atomic_compare_exchange_strong(&mran->next, &old_next, new_next));
 
 	/* malloc arenas need to zero out */
@@ -575,7 +579,7 @@ static void fy_mremap_cleanup(struct fy_allocator *a)
 		fy_mremap_tag_cleanup(mra, mrt);
 	}
 
-	fy_parent_allocator_free(&mra->a, mra->ids);
+	fy_parent_allocator_free(&mra->a, (void *)mra->ids);
 	fy_parent_allocator_free(&mra->a, mra->tags);
 }
 
@@ -950,7 +954,7 @@ static int fy_mremap_set_tag_count(struct fy_allocator *a, unsigned int count)
 	}
 	if (mra->ids != ids) {
 		mra->ids = ids;
-		fy_parent_allocator_free(&mra->a, mra->ids);
+		fy_parent_allocator_free(&mra->a, (void *)mra->ids);
 	}
 	mra->tag_count = tag_count;
 	mra->tag_id_count = tag_id_count;
@@ -958,7 +962,7 @@ static int fy_mremap_set_tag_count(struct fy_allocator *a, unsigned int count)
 
 err_out:
 	fy_parent_allocator_free(&mra->a, tags);
-	fy_parent_allocator_free(&mra->a, ids);
+	fy_parent_allocator_free(&mra->a, (void *)ids);
 	return -1;
 }
 
@@ -1080,7 +1084,7 @@ fy_mremap_get_info(struct fy_allocator *a, int tag)
 					arena_info->free = arena_free;
 					arena_info->used = arena_used;
 					arena_info->total = arena_total;
-					arena_info->data = (void *)mran + FY_MREMAP_ARENA_OVERHEAD;
+					arena_info->data = (char *)mran + FY_MREMAP_ARENA_OVERHEAD;
 					arena_info->size = arena_info->used;
 					arena_info++;
 					tag_info->num_arena_infos++;
@@ -1124,7 +1128,7 @@ static bool mremap_tag_contains(struct fy_mremap_tag *mrt, const void *p)
 
 	for (mra = fy_atomic_load(&mrt->arenas); mra; mra = mra->next_arena) {
 		if (p >= (const void *)mra->mem &&
-		    p < (const void *)mra->mem + mra->size)
+		    p < (const void *)((const char *)mra->mem + mra->size))
 			return true;
 	}
 

@@ -15,7 +15,6 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <errno.h>
-#include <unistd.h>
 #include <limits.h>
 
 #include <libfyaml.h>
@@ -912,8 +911,8 @@ struct fy_token *fy_node_non_synthesized_token(struct fy_node *fyn)
 	if (!fyt_start || !fyt_end)
 		return NULL;
 
-	s = fy_input_start(fyi) + fyt_start->handle.start_mark.input_pos;
-	e = fy_input_start(fyi) + fyt_end->handle.end_mark.input_pos;
+	s = (const char *)fy_input_start(fyi) + fyt_start->handle.start_mark.input_pos;
+	e = (const char *)fy_input_start(fyi) + fyt_end->handle.end_mark.input_pos;
 	size = (size_t)(e - s);
 
 	if (size > 0)
@@ -1943,11 +1942,11 @@ struct fy_document *fy_parse_load_document(struct fy_parser *fyp)
 }
 
 struct fy_node *fy_node_copy_internal(struct fy_document *fyd, struct fy_node *fyn_from,
-				      struct fy_node *fyn_parent)
+				      struct fy_node *fyn_parent, int depth)
 {
 	struct fy_document *fyd_from;
-	struct fy_node *fyn, *fyni, *fynit;
-	struct fy_node_pair *fynp, *fynpt;
+	struct fy_node *fyn = NULL, *fyni = NULL, *fynit = NULL;
+	struct fy_node_pair *fynp = NULL, *fynpt = NULL;
 	struct fy_anchor *fya, *fya_from;
 	const char *anchor;
 	size_t anchor_len;
@@ -1955,6 +1954,11 @@ struct fy_node *fy_node_copy_internal(struct fy_document *fyd, struct fy_node *f
 
 	if (!fyd || !fyn_from || !fyn_from->fyd)
 		return NULL;
+
+	FYD_NODE_ERROR_CHECK(fyd, fyn_from, FYEM_DOC,
+			depth < FY_NODE_PATH_WALK_DEPTH_DEFAULT, err_out,
+			"maximum node copy depth exceeded %d (max %d)",
+			depth, FY_NODE_PATH_WALK_DEPTH_DEFAULT);
 
 	fyd_from = fyn_from->fyd;
 
@@ -1975,12 +1979,13 @@ struct fy_node *fy_node_copy_internal(struct fy_document *fyd, struct fy_node *f
 		for (fyni = fy_node_list_head(&fyn_from->sequence); fyni;
 				fyni = fy_node_next(&fyn_from->sequence, fyni)) {
 
-			fynit = fy_node_copy_internal(fyd, fyni, fyn);
+			fynit = fy_node_copy_internal(fyd, fyni, fyn, depth + 1);
 			fyd_error_check(fyd, fynit, err_out,
 					"fy_node_copy_internal() failed");
 
 			fy_node_list_add_tail(&fyn->sequence, fynit);
 			fynit->attached = true;
+			fynit = NULL;
 		}
 
 		break;
@@ -1992,9 +1997,24 @@ struct fy_node *fy_node_copy_internal(struct fy_document *fyd, struct fy_node *f
 			fyd_error_check(fyd, fynpt, err_out,
 					"fy_node_pair_alloc() failed");
 
-			fynpt->key = fy_node_copy_internal(fyd, fynp->key, fyn);
-			fynpt->value = fy_node_copy_internal(fyd, fynp->value, fyn);
+			if (fynp->key) {
+				fynpt->key = fy_node_copy_internal(fyd, fynp->key, fyn, depth + 1);
+				fyd_error_check(fyd, fynpt->key, err_out,
+						"fy_node_copy_internal() key failed");
+			}
+			if (fynp->value) {
+				fynpt->value = fy_node_copy_internal(fyd, fynp->value, fyn, depth + 1);
+				fyd_error_check(fyd, fynpt->value, err_out,
+						"fy_node_copy_internal() key failed");
+			}
 			fynp->parent = fyn;
+
+			if (fynpt->key) {
+				fynpt->key->attached = true;
+				fynpt->key->key_root = true;
+			}
+			if (fynpt->value)
+				fynpt->value->attached = true;
 
 			fy_node_pair_list_add_tail(&fyn->mapping, fynpt);
 			if (fyn->xl) {
@@ -2002,12 +2022,7 @@ struct fy_node *fy_node_copy_internal(struct fy_document *fyd, struct fy_node *f
 				fyd_error_check(fyd, !rc, err_out,
 						"fy_accel_insert() failed");
 			}
-			if (fynpt->key) {
-				fynpt->key->attached = true;
-				fynpt->key->key_root = true;
-			}
-			if (fynpt->value)
-				fynpt->value->attached = true;
+			fynpt = NULL;
 		}
 		break;
 	}
@@ -2041,6 +2056,9 @@ struct fy_node *fy_node_copy_internal(struct fy_document *fyd, struct fy_node *f
 	return fyn;
 
 err_out:
+	fy_node_free(fynit);
+	fy_node_pair_free(fynpt);
+	fy_node_free(fyn);
 	return NULL;
 }
 
@@ -2051,7 +2069,7 @@ struct fy_node *fy_node_copy(struct fy_document *fyd, struct fy_node *fyn_from)
 	if (!fyd)
 		return NULL;
 
-	fyn = fy_node_copy_internal(fyd, fyn_from, NULL);
+	fyn = fy_node_copy_internal(fyd, fyn_from, NULL, 0);
 	if (!fyn) {
 		fyd->diag->on_error = false;
 		return NULL;
@@ -3290,13 +3308,14 @@ static struct fy_document *fy_document_build_internal(const struct fy_parse_cfg 
 		fyp->stream_error = false;
 
 	/* if we collect diagnostics, we can continue */
-	fyp_error_check(fyp, fyd || (fyp->cfg.flags & FYPCF_COLLECT_DIAG), err_out,
-			"fy_parse_load_document() failed");
+	if (!fyd && !(fyp->cfg.flags & FYPCF_COLLECT_DIAG))
+		goto err_out;
 
 	/* no document, but we're collecting diagnostics */
 	if (!fyd) {
 
-		fyp_error(fyp, "fy_parse_load_document() failed");
+		if (fyp->cfg.flags & FYPCF_COLLECT_DIAG)
+			fyp_error(fyp, "fy_parse_load_document() failed");
 
 		fyp->stream_error = false;
 		fyd = fy_parse_document_create(fyp, NULL);
@@ -3385,6 +3404,81 @@ enum fy_node_style fy_node_get_style(struct fy_node *fyn)
 {
 	/* a NULL is a plain scalar node */
 	return fyn ? fyn->style : FYNS_PLAIN;
+}
+
+enum fy_node_style fy_node_set_style(struct fy_node *fyn, enum fy_node_style style)
+{
+	const struct fy_token_analysis *ta;
+
+	/* a NULL node is always plain */
+	if (!fyn)
+		return FYNS_PLAIN;
+
+	/* same style */
+	if (style == fyn->style)
+		return style;
+
+	/* can't change an alias style */
+	if (fyn->style == FYNS_ALIAS)
+		return fyn->style;
+
+	/* any is easy... */
+	if (style == FYNS_ANY) {
+		fyn->style = style;
+		return style;
+	}
+
+	/* for a collection the choices are limited */
+	if (fyn->type == FYNT_MAPPING ||
+	    fyn->type == FYNT_SEQUENCE) {
+
+		/* only flow/block style is allowed */
+		if (style == FYNS_FLOW || style == FYNS_BLOCK)
+			fyn->style = style;
+
+		return fyn->style;
+	}
+
+	/* a scalar, analyze it */
+	ta = fy_token_text_analyze(fyn->scalar);
+	switch (style) {
+	case FYNS_PLAIN:
+		if (ta->flags & FYTTAF_CAN_BE_PLAIN)
+			fyn->style = style;
+		break;
+	case FYNS_SINGLE_QUOTED:
+		if (ta->flags & FYTTAF_CAN_BE_SINGLE_QUOTED)
+			fyn->style = style;
+		break;
+
+	case FYNS_DOUBLE_QUOTED:
+		if (ta->flags & FYTTAF_CAN_BE_DOUBLE_QUOTED)
+			fyn->style = style;
+		break;
+
+	case FYNS_LITERAL:
+		if (ta->flags & FYTTAF_CAN_BE_LITERAL)
+			fyn->style = style;
+		break;
+
+	case FYNS_FOLDED:
+		/* we never support changing style to folded
+		 * it is never emitted and frankly not worth the effort.
+		 */
+		break;
+
+	default:
+		/* anything else, doesn't take */
+		break;
+
+	}
+
+	/* NOTE even if the style has 'taken' the emitter is free to change it
+	 * since the style might not be possible at a given state. For example
+	 * setting a literal style when the emitter is in flow mode obviously
+	 * will not work.
+	 */
+	return fyn->style;
 }
 
 struct fy_token *fy_node_get_start_token(struct fy_node *fyn)
@@ -3964,6 +4058,22 @@ bool fy_node_is_empty(struct fy_node *fyn)
 	return true;
 }
 
+#ifdef _MSC_VER
+/* MSVC version - use _alloca with helper function */
+static __inline struct fy_node_walk_ctx *
+fy_node_walk_ctx_init_impl(struct fy_node_walk_ctx *ctx, unsigned int max_depth, unsigned int mark)
+{
+	ctx->max_depth = max_depth;
+	ctx->next_slot = 0;
+	ctx->mark = mark;
+	return ctx;
+}
+#define fy_node_walk_ctx_create_a(_max_depth, _mark) \
+	fy_node_walk_ctx_init_impl( \
+		(struct fy_node_walk_ctx *)_alloca(sizeof(struct fy_node_walk_ctx) + sizeof(struct fy_node *) * (_max_depth)), \
+		(_max_depth), \
+		(_mark))
+#else
 #define fy_node_walk_ctx_create_a(_max_depth, _mark) \
 	({ \
 		unsigned int __max_depth = (_max_depth); \
@@ -3975,6 +4085,7 @@ bool fy_node_is_empty(struct fy_node *fyn)
 		_ctx->mark = (_mark); \
 		_ctx; \
 	})
+#endif
 
 static inline void fy_node_walk_mark_start(struct fy_node_walk_ctx *ctx)
 {
@@ -4115,8 +4226,8 @@ fy_node_by_path_internal(struct fy_node *fyn,
 	const char *s, *e, *ss, *ee;
 	char *end_idx, *json_key, *t, *p, *uri_path;
 	char c;
-	int idx, rlen;
-	size_t len, json_key_len, uri_path_len;
+	int idx;
+	size_t len, rlen, json_key_len, uri_path_len;
 	bool has_json_key_esc;
 	uint8_t code[4];
 	int code_length;
@@ -4385,7 +4496,7 @@ fy_node_by_path_internal(struct fy_node *fyn,
 			while (ss < ee) {
 				/* copy run until '%' or end */
 				p = memchr(ss, '%', ee - ss);
-				rlen = (p ? p : ee) - ss;
+				rlen = (size_t)((p ? p : ee) - ss);
 				memcpy(t, ss, rlen);
 				ss += rlen;
 				t += rlen;
@@ -5887,7 +5998,7 @@ void fy_node_mapping_perform_sort(struct fy_node *fyn_map,
 		def_arg.cmp_fn = NULL;
 		def_arg.arg = NULL;
 	}
-	ctx.key_cmp = key_cmp ? : fy_node_mapping_sort_cmp_default;
+	ctx.key_cmp = key_cmp ? key_cmp : fy_node_mapping_sort_cmp_default;
 	ctx.arg = key_cmp ? arg : &def_arg;
 	ctx.fynpp = fynpp;
 	ctx.count = count;
@@ -7646,4 +7757,62 @@ fy_document_iterator_generate_next(struct fy_document_iterator *fydi)
 
 	fydi->generator_state |= FYDIGF_GENERATED_NULL;
 	return NULL;
+}
+
+const char *
+fy_node_get_comment(struct fy_node *fyn, enum fy_comment_placement placement)
+{
+	struct fy_token *fyt;
+
+	if (!fyn)
+		return NULL;
+
+	switch (fyn->type) {
+	case FYNT_SCALAR:
+		fyt = fyn->scalar;
+		break;
+	case FYNT_SEQUENCE:
+		fyt = fyn->sequence_start;
+		break;
+	case FYNT_MAPPING:
+		fyt = fyn->mapping_start;
+		break;
+	default:
+		fyt = NULL;
+		break;
+	}
+
+	if (!fyt)
+		return NULL;
+
+	return fy_token_get_comment(fyt, placement);
+}
+
+const char *
+fy_node_get_comments(struct fy_node *fyn)
+{
+	struct fy_token *fyt;
+
+	if (!fyn)
+		return NULL;
+
+	switch (fyn->type) {
+	case FYNT_SCALAR:
+		fyt = fyn->scalar;
+		break;
+	case FYNT_SEQUENCE:
+		fyt = fyn->sequence_start;
+		break;
+	case FYNT_MAPPING:
+		fyt = fyn->mapping_start;
+		break;
+	default:
+		fyt = NULL;
+		break;
+	}
+
+	if (!fyt)
+		return NULL;
+
+	return fy_token_get_comments(fyt);
 }

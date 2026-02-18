@@ -113,6 +113,13 @@ struct fy_token_analysis {
 	int maxcol;
 };
 
+struct fy_token_comment {
+	struct fy_token_comment *next;
+	enum fy_comment_placement placement;
+	struct fy_atom handle;
+	char *comment;
+};
+
 FY_TYPE_FWD_DECL_LIST(token);
 struct fy_token {
 	struct list_head node;
@@ -123,7 +130,8 @@ struct fy_token {
 	const char *text;
 	char *text0;		/* this is allocated */
 	struct fy_atom handle;
-	struct fy_atom *comment;	/* only when enabled */
+	struct fy_token_comment *token_comment;
+	char *comments;		/* this is allocated */
 	union  {
 		struct {
 			unsigned int tag_length;	/* from start */
@@ -207,7 +215,8 @@ fy_token_alloc_rl(struct fy_token_list *fytl)
 	fyt->text = NULL;
 	fyt->text0 = NULL;
 	fyt->handle.fyi = NULL;
-	fyt->comment = NULL;
+	fyt->token_comment = NULL;
+	fyt->comments = NULL;
 
 	return fyt;
 }
@@ -247,13 +256,13 @@ fy_token_alloc(void)
 static inline FY_ALWAYS_INLINE void
 fy_token_clean(struct fy_token *fyt)
 {
-	return fy_token_clean_rl(NULL, fyt);
+	fy_token_clean_rl(NULL, fyt);
 }
 
 static inline FY_ALWAYS_INLINE void
 fy_token_free(struct fy_token *fyt)
 {
-	return fy_token_free_rl(NULL, fyt);
+	fy_token_free_rl(NULL, fyt);
 }
 
 static inline FY_ALWAYS_INLINE struct fy_token *
@@ -271,13 +280,13 @@ fy_token_ref(struct fy_token *fyt)
 static inline FY_ALWAYS_INLINE void
 fy_token_unref(struct fy_token *fyt)
 {
-	return fy_token_unref_rl(NULL, fyt);
+	fy_token_unref_rl(NULL, fyt);
 }
 
 static inline void
 fy_token_list_unref_all(struct fy_token_list *fytl_tofree)
 {
-	return fy_token_list_unref_all_rl(NULL, fytl_tofree);
+	fy_token_list_unref_all_rl(NULL, fytl_tofree);
 }
 
 /* recycling aware */
@@ -312,11 +321,11 @@ fy_token_list_queue(struct fy_token_list *fytl, enum fy_token_type type, ...)
 	return fyt;
 }
 
-int fy_tag_token_format_text_length(const struct fy_token *fyt);
+size_t fy_tag_token_format_text_length(const struct fy_token *fyt);
 const char *fy_tag_token_format_text(const struct fy_token *fyt, char *buf, size_t maxsz);
-int fy_token_format_utf8_length(struct fy_token *fyt);
+size_t fy_token_format_utf8_length(struct fy_token *fyt);
 
-int fy_token_format_text_length(struct fy_token *fyt);
+size_t fy_token_format_text_length(struct fy_token *fyt);
 const char *fy_token_format_text(struct fy_token *fyt, char *buf, size_t maxsz);
 
 /* non-parser token methods */
@@ -467,6 +476,21 @@ unsigned int fy_analyze_scalar_content(const char *data, size_t size,
 /* must be freed */
 char *fy_token_debug_text(struct fy_token *fyt);
 
+#ifdef _MSC_VER
+/* MSVC version using thread-local buffer */
+#define FY_TOKEN_DEBUG_TEXT_A_BUFSZ 4096
+static __declspec(thread) char fy_token_debug_text_a_buf[FY_TOKEN_DEBUG_TEXT_A_BUFSZ];
+static __inline const char *fy_token_debug_text_a_impl(struct fy_token *fyt)
+{
+	char *buf = fy_token_debug_text(fyt);
+	if (!buf) return "";
+	strncpy(fy_token_debug_text_a_buf, buf, FY_TOKEN_DEBUG_TEXT_A_BUFSZ - 1);
+	fy_token_debug_text_a_buf[FY_TOKEN_DEBUG_TEXT_A_BUFSZ - 1] = '\0';
+	free(buf);
+	return fy_token_debug_text_a_buf;
+}
+#define fy_token_debug_text_a(_fyt) fy_token_debug_text_a_impl(_fyt)
+#else
 #define fy_token_debug_text_a(_fyt) \
 	({ \
 		struct fy_token *__fyt = (_fyt); \
@@ -481,6 +505,7 @@ char *fy_token_debug_text(struct fy_token *fyt);
 		} \
 		_rbuf; \
 	})
+#endif
 
 int fy_token_memcmp(struct fy_token *fyt, const void *ptr, size_t len);
 int fy_token_strcmp(struct fy_token *fyt, const char *str);

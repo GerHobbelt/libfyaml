@@ -217,6 +217,8 @@ struct fy_parser {
 
 	/* last comment */
 	struct fy_atom last_comment;
+	/* next comment */
+	struct fy_atom override_comment;
 
 	/* indent stack */
 	struct fy_indent_list indent_stack;
@@ -418,7 +420,7 @@ static inline void
 fy_get_mark(struct fy_parser *fyp, struct fy_mark *fym)
 {
 	assert(fyp);
-	return fy_reader_get_mark(fyp->reader, fym);
+	fy_reader_get_mark(fyp->reader, fym);
 }
 
 static inline const void *
@@ -440,7 +442,7 @@ static inline void
 fy_advance_octets(struct fy_parser *fyp, size_t advance)
 {
 	assert(fyp);
-	return fy_reader_advance_octets(fyp->reader, advance);
+	fy_reader_advance_octets(fyp->reader, advance);
 }
 
 /* compare string at the current point (n max) */
@@ -619,7 +621,7 @@ fy_parser_set_reader(struct fy_parser *fyp, struct fy_reader *fyr)
 {
 	if (!fyp)
 		return;
-	fyp->reader = fyr ? : &fyp->builtin_reader;
+	fyp->reader = fyr ? fyr : &fyp->builtin_reader;
 }
 
 static inline void

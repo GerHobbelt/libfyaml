@@ -21,11 +21,17 @@
 #include <time.h>
 #include <inttypes.h>
 
-#include <libfyaml.h>
+#include <getopt.h>
+
+#ifndef _WIN32
+#include "fy-win32.h"
+#endif
 
 #if defined(HAVE_LIBYAML) && HAVE_LIBYAML
 #include <yaml.h>
 #endif
+
+#include <libfyaml.h>
 
 #include "fy-parse.h"
 #include "fy-walk.h"
@@ -1030,7 +1036,7 @@ int do_comment(struct fy_parser *fyp)
 	struct fy_atom *handle;
 	enum fy_comment_placement placement;
 	static const char *placement_txt[] =  { "top", "right", "bottom" };
-	char buf[1024];
+	const char *comment;
 
 	fydi = fy_document_iterator_create();
 	assert(fydi);
@@ -1057,10 +1063,11 @@ int do_comment(struct fy_parser *fyp)
 				if (!handle || !fy_atom_is_set(handle))
 					continue;
 
-				if (!fy_token_get_comment(fyt, buf, sizeof(buf), placement))
+				comment = fy_token_get_comment(fyt, placement);
+				if (!comment)
 					continue;
 
-				fprintf(stderr, "%s: %s\n", placement_txt[placement], buf);
+				fprintf(stderr, "%s: %s\n", placement_txt[placement], comment);
 			}
 
 			free(path);
@@ -1662,7 +1669,7 @@ static void do_accel_kv(const struct fy_parse_cfg *cfg, int argc, char *argv[])
 		key = fy_kv_store_key_by_index(&kvs, idx);
 		assert(key);
 
-		printf("removing #%d - %s\n", idx, key);
+		printf("removing #%d - %s\n", idx, key ? key : "<NULL>");
 
 		rc = fy_kv_store_remove(&kvs, key);
 		assert(!rc);
@@ -2763,8 +2770,10 @@ int do_build(const struct fy_parse_cfg *cfg, int argc, char *argv[])
 		FILE *fp;
 		char *mbuf = NULL;
 		size_t msize;
+		struct fy_memstream *fyms = NULL;
 
-		fp = open_memstream(&mbuf, &msize);
+		fyms = fy_memstream_open(&fp);
+		assert(fyms);
 		assert(fp);
 
 		fy_diag_cfg_default(&dcfg);
@@ -2785,8 +2794,7 @@ int do_build(const struct fy_parse_cfg *cfg, int argc, char *argv[])
 
 		fy_diag_destroy(diag);
 
-		fclose(fp);
-
+		mbuf = fy_memstream_close(fyms, &msize);
 		assert(mbuf);
 
 		printf("checking diagnostic\n");
@@ -2802,9 +2810,10 @@ int do_build(const struct fy_parse_cfg *cfg, int argc, char *argv[])
 		FILE *fp;
 		char *mbuf = NULL;
 		size_t msize;
+		struct fy_memstream *fyms = NULL;
 
-		fp = open_memstream(&mbuf, &msize);
-		assert(fp);
+		fyms = fy_memstream_open(&fp);
+		assert(fyms);
 
 		fy_diag_cfg_default(&dcfg);
 		dcfg.fp = NULL;
@@ -2826,8 +2835,7 @@ int do_build(const struct fy_parse_cfg *cfg, int argc, char *argv[])
 
 		fy_diag_destroy(diag);
 
-		fclose(fp);
-
+		mbuf = fy_memstream_close(fyms, &msize);
 		assert(mbuf);
 
 		printf("checking diagnostic\n");
@@ -3745,7 +3753,7 @@ int do_walk(struct fy_parser *fyp, const char *walkpath, const char *walkstart, 
 		assert(fwr);
 		fwr->type = fwrt_node_ref;
 		fwr->fyn = fyn;
-		result = fy_path_expr_execute(fypx, 0, expr, fwr, fpet_none);
+		result = fy_path_expr_execute(fypx, 0, expr, fwr, fpet_none, NULL);
 
 		printf("\n");
 		if (!result) {

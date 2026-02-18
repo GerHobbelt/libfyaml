@@ -169,8 +169,10 @@ void fy_parser_event_free(struct fy_parser *fyp, struct fy_event *fye)
 	if (!fyp || !fye)
 		return;
 
-	if (fy_reader_generates_events(fyp->reader))
-		return fy_reader_event_free(fyp->reader, fye);
+	if (fy_reader_generates_events(fyp->reader)) {
+		fy_reader_event_free(fyp->reader, fye);
+		return;
+	}
 
 	fyep = container_of(fye, struct fy_eventp, e);
 
@@ -1015,6 +1017,229 @@ fy_document_start_event_version(struct fy_event *fye)
 	return fy_document_state_version(fye->document_start.document_state);
 }
 
+char *fy_event_to_string(struct fy_event *fye)
+{
+	struct fy_memstream *fyms = NULL;
+	FILE *fp = NULL;
+	char *mbuf = NULL;
+	const char *anchor = NULL;
+	const char *tag = NULL;
+	const char *text = NULL;
+	const char *alias = NULL;
+	size_t msize, anchor_len = 0, tag_len = 0, text_len = 0, alias_len = 0;
+	enum fy_scalar_style style;
+	const uint8_t *p;
+	int i, c, w;
+
+	if (!fye)
+		return NULL;
+
+	fyms = fy_memstream_open(&fp);
+	if (!fyms)
+		return NULL;
+
+	/* event type */
+	switch (fye->type) {
+	case FYET_NONE:
+		fprintf(fp, "???");
+		break;
+	case FYET_STREAM_START:
+		fprintf(fp, "+STR");
+		break;
+	case FYET_STREAM_END:
+		fprintf(fp, "-STR");
+		break;
+	case FYET_DOCUMENT_START:
+		fprintf(fp, "+DOC");
+		break;
+	case FYET_DOCUMENT_END:
+		fprintf(fp, "-DOC");
+		break;
+	case FYET_MAPPING_START:
+		fprintf(fp, "+MAP");
+		if (fye->mapping_start.anchor)
+			anchor = fy_token_get_text(fye->mapping_start.anchor, &anchor_len);
+		if (fye->mapping_start.tag)
+			tag = fy_token_get_text(fye->mapping_start.tag, &tag_len);
+		if (fy_event_get_node_style(fye) == FYNS_FLOW)
+			fprintf(fp, " {}");
+		break;
+	case FYET_MAPPING_END:
+		fprintf(fp, "-MAP");
+		break;
+	case FYET_SEQUENCE_START:
+		fprintf(fp, "+SEQ");
+		if (fye->sequence_start.anchor)
+			anchor = fy_token_get_text(fye->sequence_start.anchor, &anchor_len);
+		if (fye->sequence_start.tag)
+			tag = fy_token_get_text(fye->sequence_start.tag, &tag_len);
+		if (fy_event_get_node_style(fye) == FYNS_FLOW)
+			fprintf(fp, " []");
+		break;
+	case FYET_SEQUENCE_END:
+		fprintf(fp, "-SEQ");
+		break;
+	case FYET_SCALAR:
+		fprintf(fp, "=VAL");
+		if (fye->scalar.anchor)
+			anchor = fy_token_get_text(fye->scalar.anchor, &anchor_len);
+		if (fye->scalar.tag)
+			tag = fy_token_get_text(fye->scalar.tag, &tag_len);
+		break;
+	case FYET_ALIAS:
+		fprintf(fp, "=ALI");
+		break;
+	default:
+		break;
+	}
+
+	/* (position) anchor and tag */
+	if (anchor)
+		fprintf(fp, " &%.*s", (int)anchor_len, anchor);
+	if (tag)
+		fprintf(fp, " <%.*s>", (int)tag_len, tag);
+
+	/* style hint */
+	switch (fye->type) {
+	default:
+		break;
+	case FYET_DOCUMENT_START:
+		if (!fy_document_event_is_implicit(fye))
+			fprintf(fp, " ---");
+		break;
+	case FYET_DOCUMENT_END:
+		if (!fy_document_event_is_implicit(fye))
+			fprintf(fp, " ...");
+		break;
+	case FYET_MAPPING_START:
+		break;
+	case FYET_SEQUENCE_START:
+		break;
+	case FYET_SCALAR:
+		style = fy_token_scalar_style(fye->scalar.value);
+		switch (style) {
+		case FYSS_ANY:
+			fprintf(fp, " !");
+			break;
+		case FYSS_PLAIN:
+			fprintf(fp, " :");
+			break;
+		case FYSS_SINGLE_QUOTED:
+			fprintf(fp, " '");
+			break;
+		case FYSS_DOUBLE_QUOTED:
+			fprintf(fp, " \"");
+			break;
+		case FYSS_LITERAL:
+			fprintf(fp, " |");
+			break;
+		case FYSS_FOLDED:
+			fprintf(fp, " >");
+			break;
+		default:
+			break;
+		}
+		break;
+	case FYET_ALIAS:
+		break;
+	}
+
+	/* content */
+	switch (fye->type) {
+	default:
+		break;
+	case FYET_SCALAR:
+		text = fy_token_get_text(fye->scalar.value, &text_len);
+		for (p = (const uint8_t *)text; text_len > 0; p += w, text_len -= (size_t)w) {
+
+			/* get width from the first octet */
+			w = (p[0] & 0x80) == 0x00 ? 1 :
+			    (p[0] & 0xe0) == 0xc0 ? 2 :
+			    (p[0] & 0xf0) == 0xe0 ? 3 :
+			    (p[0] & 0xf8) == 0xf0 ? 4 : 0;
+
+			/* error, clip it */
+			if ((size_t)w > text_len)
+				break;
+
+			/* initial value */
+			c = p[0] & (0xff >> w);
+			for (i = 1; i < w; i++) {
+				if ((p[i] & 0xc0) != 0x80)
+					break;
+				c = (c << 6) | (p[i] & 0x3f);
+			}
+
+			/* check for validity */
+			if ((w == 4 && c < 0x10000) ||
+			    (w == 3 && c <   0x800) ||
+			    (w == 2 && c <    0x80) ||
+			    (c >= 0xd800 && c <= 0xdfff) || c >= 0x110000)
+				break;
+
+			switch (c) {
+			case '\\':
+				fprintf(fp, "\\\\");
+				break;
+			case '\0':
+				fprintf(fp, "\\0");
+				break;
+			case '\b':
+				fprintf(fp, "\\b");
+				break;
+			case '\f':
+				fprintf(fp, "\\f");
+				break;
+			case '\n':
+				fprintf(fp, "\\n");
+				break;
+			case '\r':
+				fprintf(fp, "\\r");
+				break;
+			case '\t':
+				fprintf(fp, "\\t");
+				break;
+			case '\a':
+				fprintf(fp, "\\a");
+				break;
+			case '\v':
+				fprintf(fp, "\\v");
+				break;
+			case '\x1b':
+				fprintf(fp, "\\e");
+				break;
+			case 0x85:
+				fprintf(fp, "\\N");
+				break;
+			case 0xa0:
+				fprintf(fp, "\\_");
+				break;
+			case 0x2028:
+				fprintf(fp, "\\L");
+				break;
+			case 0x2029:
+				fprintf(fp, "\\P");
+				break;
+			default:
+				if ((c >= 0x01 && c <= 0x1f) || c == 0x7f ||	/* C0 */
+				    (c >= 0x80 && c <= 0x9f))			/* C1 */
+					fprintf(fp, "\\x%02x", c);
+				else
+					fprintf(fp, "%.*s", w, p);
+				break;
+			}
+		}
+		break;
+	case FYET_ALIAS:
+		alias = fy_token_get_text(fye->alias.anchor, &alias_len);
+		fprintf(fp, " %s%.*s", "*", (int)alias_len, alias);
+		break;
+	}
+
+	mbuf = fy_memstream_close(fyms, &msize);
+	return mbuf;
+}
+
 struct fy_eventp *
 fy_document_iterator_eventp_alloc(struct fy_document_iterator *fydi)
 {
@@ -1098,4 +1323,19 @@ void fy_document_iterator_event_free(struct fy_document_iterator *fydi, struct f
 	fyep = container_of(fye, struct fy_eventp, e);
 
 	fy_document_iterator_eventp_recycle(fydi, fyep);
+}
+
+const char *
+fy_event_get_comments(struct fy_event *fye)
+{
+	struct fy_token *fyt;
+
+	if (!fye)
+		return NULL;
+
+	fyt = fy_event_get_token(fye);
+	if (!fyt)
+		return NULL;
+
+	return fy_token_get_comments(fyt);
 }

@@ -42,7 +42,7 @@ enum fy_token_type fy_token_get_type(struct fy_token *fyt)
 
 void fy_token_clean_rl(struct fy_token_list *fytl, struct fy_token *fyt)
 {
-	int i;
+	struct fy_token_comment *tk;
 
 	if (!fyt)
 		return;
@@ -51,12 +51,19 @@ void fy_token_clean_rl(struct fy_token_list *fytl, struct fy_token *fyt)
 	fy_input_unref(fyt->handle.fyi);
 	fyt->handle.fyi = NULL;
 
-	/* release comment references */
-	if (fyt->comment) {
-		for (i = 0; i < fycp_max; i++)
-			fy_input_unref(fyt->comment[i].fyi);
-		free(fyt->comment);
-		fyt->comment = NULL;
+	/* release the token comments */
+	while ((tk = fyt->token_comment) != NULL) {
+		fyt->token_comment = tk->next;
+		fy_input_unref(tk->handle.fyi);
+		fy_atom_reset(&tk->handle);
+		if (tk->comment)
+			free(tk->comment);
+		free(tk);
+	}
+
+	if (fyt->comments) {
+		free(fyt->comments);
+		fyt->comments = NULL;
 	}
 
 	switch (fyt->type) {
@@ -144,13 +151,26 @@ static bool fy_token_text_needs_rebuild(struct fy_token *fyt)
 	return fya->fyi_generation != fya->fyi->generation;
 }
 
-static int fy_tag_token_format_internal(const struct fy_token *fyt, void *out, size_t *outszp)
+#define O_CPY(_src, _len) \
+	do { \
+		size_t _l = (_len); \
+		if (o && _l) { \
+			size_t _cl = _l; \
+			if (_cl > (size_t)(oe - o)) \
+				_cl = (size_t)(oe - o); \
+			memcpy(o, (_src), _cl); \
+			o += _cl; \
+		} \
+		len += _l; \
+	} while(0)
+
+static size_t fy_tag_token_format_internal(const struct fy_token *fyt, void *out, size_t *outszp)
 {
 	char *o = NULL, *oe = NULL;
 	size_t outsz;
 	const char *handle, *suffix;
-	size_t handle_size, suffix_size;
-	int len, code_length, rlen;
+	size_t len, rlen, handle_size, suffix_size;
+	int code_length;
 	uint8_t code[4];
 	const char *t, *s, *e;
 
@@ -163,31 +183,18 @@ static int fy_tag_token_format_internal(const struct fy_token *fyt, void *out, s
 	if (out) {
 		outsz = *outszp;
 		o = out;
-		oe = out + outsz;
+		oe = (char *)out + outsz;
 	}
 
 	if (!fyt->tag.fyt_td)
-		return -1;
+		return 0;
 
 	handle = fy_tag_directive_token_prefix(fyt->tag.fyt_td, &handle_size);
 	if (!handle)
-		return -1;
+		return 0;
 
 	suffix = fy_atom_data(&fyt->handle) + fyt->tag.skip + fyt->tag.handle_length;
 	suffix_size = fyt->tag.suffix_length;
-
-#define O_CPY(_src, _len) \
-	do { \
-		int _l = (_len); \
-		if (o && _l) { \
-			int _cl = _l; \
-			if (_cl > (oe - o)) \
-				_cl = oe - o; \
-			memcpy(o, (_src), _cl); \
-			o += _cl; \
-		} \
-		len += _l; \
-	} while(0)
 
 	len = 0;
 	O_CPY(handle, handle_size);
@@ -198,7 +205,7 @@ static int fy_tag_token_format_internal(const struct fy_token *fyt, void *out, s
 	while (s < e) {
 		/* find next escape */
 		t = memchr(s, '%', e - s);
-		rlen = (t ? t : e) - s;
+		rlen = (size_t)((t ? t : e) - s);
 		O_CPY(s, rlen);
 
 		/* end of string */
@@ -216,28 +223,28 @@ static int fy_tag_token_format_internal(const struct fy_token *fyt, void *out, s
 		s = t;
 	}
 
-#undef O_CPY
 	return len;
-
 }
 
-int fy_tag_token_format_text_length(const struct fy_token *fyt)
+size_t fy_tag_token_format_text_length(const struct fy_token *fyt)
 {
 	return fy_tag_token_format_internal(fyt, NULL, NULL);
 }
 
 const char *fy_tag_token_format_text(const struct fy_token *fyt, char *buf, size_t maxsz)
 {
+	if (maxsz > 0)
+		buf[0] = '\0';
 	fy_tag_token_format_internal(fyt, buf, &maxsz);
 	return buf;
 }
 
-static int fy_tag_directive_token_format_internal(const struct fy_token *fyt,
+static size_t fy_tag_directive_token_format_internal(const struct fy_token *fyt,
 			void *out, size_t *outszp)
 {
 	char *o = NULL, *oe = NULL;
 	size_t outsz;
-	int len;
+	size_t len;
 	const char *handle, *prefix;
 	size_t handle_size, prefix_size;
 
@@ -250,21 +257,8 @@ static int fy_tag_directive_token_format_internal(const struct fy_token *fyt,
 	if (out) {
 		outsz = *outszp;
 		o = out;
-		oe = out + outsz;
+		oe = (char *)out + outsz;
 	}
-
-#define O_CPY(_src, _len) \
-	do { \
-		int _l = (_len); \
-		if (o && _l) { \
-			int _cl = _l; \
-			if (_cl > (oe - o)) \
-				_cl = oe - o; \
-			memcpy(o, (_src), _cl); \
-			o += _cl; \
-		} \
-		len += _l; \
-	} while(0)
 
 	len = 0;
 
@@ -283,12 +277,11 @@ static int fy_tag_directive_token_format_internal(const struct fy_token *fyt,
 	if (!handle_size)
 		O_CPY(">", 1);
 
-#undef O_CPY
 	return len;
-
 }
+#undef O_CPY
 
-int fy_tag_directive_token_format_text_length(const struct fy_token *fyt)
+size_t fy_tag_directive_token_format_text_length(const struct fy_token *fyt)
 {
 	return fy_tag_directive_token_format_internal(fyt, NULL, NULL);
 }
@@ -533,9 +526,9 @@ struct fy_token *fy_parse_token_create(struct fy_parser *fyp, enum fy_token_type
 	return fyt;
 }
 
-int fy_token_format_text_length(struct fy_token *fyt)
+size_t fy_token_format_text_length(struct fy_token *fyt)
 {
-	int length;
+	size_t length;
 
 	if (!fyt)
 		return 0;
@@ -553,7 +546,6 @@ int fy_token_format_text_length(struct fy_token *fyt)
 	}
 
 	length = fy_atom_format_text_length(&fyt->handle);
-
 	return length;
 }
 
@@ -587,7 +579,7 @@ const char *fy_token_format_text(struct fy_token *fyt, char *buf, size_t maxsz)
 	return str;
 }
 
-int fy_token_format_utf8_length(struct fy_token *fyt)
+size_t fy_token_format_utf8_length(struct fy_token *fyt)
 {
 	const char *str;
 	size_t len;
@@ -610,7 +602,6 @@ int fy_token_format_utf8_length(struct fy_token *fyt)
 
 	return fy_atom_format_utf8_length(&fyt->handle);
 }
-
 
 struct fy_atom *fy_token_atom(struct fy_token *fyt)
 {
@@ -688,7 +679,7 @@ fy_token_text_analyze(struct fy_token *fyt)
 
 		flags |= FYTTAF_DIRECT_OUTPUT;
 
-		maxcol = fyt->handle.storage_hint;
+		maxcol = (int)fyt->handle.storage_hint;
 		maxspan = maxcol - 1;
 		flags |=
 			FYTTAF_DIRECT_OUTPUT |
@@ -1067,7 +1058,7 @@ const char *fy_tag_token_short(struct fy_token *fyt, size_t *lenp)
 	text0[handle_len + suffix_len] = '\0';
 
 	fyt->tag.short0 = text0;
-	fyt->tag.short_length = handle_len + suffix_len;
+	fyt->tag.short_length = (unsigned int)(handle_len + suffix_len);
 
 	*lenp = fyt->tag.short_length;
 
@@ -1094,7 +1085,7 @@ const struct fy_version * fy_version_directive_token_version(struct fy_token *fy
 
 static void fy_token_prepare_text(struct fy_token *fyt)
 {
-	int ret;
+	size_t ret;
 
 	assert(fyt);
 
@@ -1102,7 +1093,7 @@ static void fy_token_prepare_text(struct fy_token *fyt)
 	ret = fy_token_format_text_length(fyt);
 
 	/* no text on this token? */
-	if (ret == -1) {
+	if (ret == 0) {
 		fyt->text_len = 0;
 		fyt->text = fyt->text0 = strdup("");
 		return;
@@ -1174,85 +1165,261 @@ enum comment_out_state {
 	cos_lastnlhashspc,
 };
 
-const char *fy_token_get_comment(struct fy_token *fyt, char *buf, size_t maxsz,
-	enum fy_comment_placement which)
+const char *
+fy_token_get_comment(struct fy_token *fyt, enum fy_comment_placement which)
 {
+	struct fy_token_comment *tk;
 	struct fy_atom *handle;
 	struct fy_atom_iter iter;
 	const struct fy_iter_chunk *ic;
 	char *s, *e;
 	const char *ss, *ee;
-	int c, w, ret;
+	int c, w, ret, pass;
+	size_t size;
 	enum comment_out_state state;
 	bool output;
 
-	if (!buf || maxsz == 0 || (unsigned int)which >= fycp_max)
+	if (!fyt || (unsigned int)which >= fycp_max)
 		return NULL;
 
-	/* return empty? */
-	handle = fy_token_comment_handle(fyt, which, false);
-	if (!handle || !fy_atom_is_set(handle))
-		return NULL;
-
-	/* start expecting # */
-	state = cos_lastnl;
-
-	s = buf;
-	e = s + maxsz;
-	fy_atom_iter_start(handle, &iter);
-	ic = NULL;
-	while ((ic = fy_atom_iter_chunk_next(&iter, ic, &ret)) != NULL) {
-		ss = ic->str;
-		ee = ss + ic->len;
-
-		while ((c = fy_utf8_get(ss, ee - ss, &w)) > 0) {
-
-			output = true;
-			switch (state) {
-			case cos_normal:
-				if (fy_is_lb_m(c, handle->lb_mode))
-					state = cos_lastnl;
-				break;
-
-			case cos_lastnl:
-				if (c == '#') {
-					state = cos_lastnlhash;
-					output = false;
-					break;
-				}
-				state = cos_normal;
-				break;
-
-			case cos_lastnlhash:
-				if (c == ' ') {
-					state = cos_lastnlhashspc;
-					output = false;
-					break;
-				}
-				state = cos_normal;
-				break;
-
-			case cos_lastnlhashspc:
-				state = cos_normal;
-				break;
-			}
-
-			if (output) {
-				s = fy_utf8_put(s, (size_t)(e - s), c);
-				if (!s)
-					return NULL;
-			}
-
-			ss += w;
-		}
+	for (tk = fyt->token_comment; tk; tk = tk->next) {
+		if (tk->placement == which && fy_atom_is_set(&tk->handle))
+			break;
 	}
-	fy_atom_iter_finish(&iter);
 
-	if (ret != 0 || s >= e)
+	/* not found, we're done */
+	if (!tk)
 		return NULL;
+
+	/* found and already generated */
+	if (tk->comment)
+		return tk->comment;
+
+	handle = &tk->handle;
+
+	s = e = NULL;
+	size = 0;
+	for (pass = 0; pass < 2; pass++) {
+
+		if (pass) {
+			tk->comment = malloc(size + 1);
+			if (!tk->comment)
+				return NULL;
+			s = tk->comment;
+			e = s + size + 1;
+		}
+
+		/* start expecting # */
+		state = cos_lastnl;
+		fy_atom_iter_start(handle, &iter);
+		ic = NULL;
+		while ((ic = fy_atom_iter_chunk_next(&iter, ic, &ret)) != NULL) {
+			ss = ic->str;
+			ee = ss + ic->len;
+
+			while ((c = fy_utf8_get(ss, ee - ss, &w)) > 0) {
+
+				output = true;
+				switch (state) {
+				case cos_normal:
+					if (fy_is_lb_m(c, handle->lb_mode))
+						state = cos_lastnl;
+					break;
+
+				case cos_lastnl:
+					if (c == '#') {
+						state = cos_lastnlhash;
+						output = false;
+						break;
+					}
+					state = cos_normal;
+					break;
+
+				case cos_lastnlhash:
+					if (c == ' ') {
+						state = cos_lastnlhashspc;
+						output = false;
+						break;
+					}
+					if (fy_is_lb_m(c, handle->lb_mode)) {
+						state = cos_lastnl;
+						output = true;
+						break;
+					}
+					state = cos_normal;
+					break;
+
+				case cos_lastnlhashspc:
+					state = cos_normal;
+					break;
+				}
+
+				if (output) {
+					if (s) {
+						s = fy_utf8_put(s, (size_t)(e - s), c);
+						if (!s)
+							return NULL;
+					}
+					size += w;
+				}
+
+				ss += w;
+			}
+		}
+		fy_atom_iter_finish(&iter);
+	}
+
+	assert(s);
+	assert(s < e);
 	*s = '\0';
 
-	return buf;
+	return tk->comment;
+}
+
+const char *
+fy_token_get_comments(struct fy_token *fyt)
+{
+	enum fy_comment_placement placement;
+	const char *str;
+	char *accum, *new_accum;
+	size_t size, accum_size, new_accum_size;
+	bool has_nl;
+
+	if (!fyt)
+		return NULL;
+
+	/* quick exit if no comments */
+	if (!fyt->token_comment)
+		return NULL;
+
+	/* already have it generated? */
+	if (fyt->comments)
+		return fyt->comments;
+
+	str = NULL;
+	accum = NULL;
+	accum_size = 0;
+	for (placement = fycp_top; placement < fycp_max; placement++) {
+
+		str = fy_token_get_comment(fyt, placement);
+		if (!str)
+			continue;
+
+		size = strlen(str);
+		has_nl = size > 0 && str[size-1] == '\n';
+		new_accum_size = accum_size + size + !has_nl + 1;
+		new_accum = realloc(accum, new_accum_size);
+		if (!new_accum)
+			goto err_out;
+		accum = new_accum;
+		memcpy(accum + accum_size, str, size);
+		accum_size += size;
+		if (!has_nl)
+			accum[accum_size++] = '\n';
+		accum[accum_size] = '\0';
+	}
+	return fyt->comments = accum;
+
+err_out:
+	if (accum)
+		free(accum);
+	return NULL;
+}
+
+int
+fy_token_set_comment(struct fy_token *fyt, enum fy_comment_placement which,
+		     const char *text, size_t len)
+{
+	struct fy_token_comment *tk, *tk_prev;
+	struct fy_input *fyi = NULL;
+	char *data = NULL;
+	const char *s, *e;
+	char utf8buf[FY_UTF8_MAX_WIDTH];
+	int c, lastc, w;
+	size_t sz;
+	struct fy_atom *handle;
+	struct fy_memstream *fyms = NULL;
+	FILE *fp;
+
+	if (!fyt || (unsigned int)which >= fycp_max)
+		return -1;
+
+	tk_prev = NULL;
+	for (tk = fyt->token_comment; tk; tk = tk->next) {
+		if (tk->placement == which)
+			break;
+		tk_prev = tk;
+	}
+
+	/* removal of comment */
+	if (!text && tk) {
+		if (!tk_prev)
+			fyt->token_comment = tk->next;
+		else
+			tk_prev = tk->next;
+
+		fy_input_unref(tk->handle.fyi);
+		fy_atom_reset(&tk->handle);
+		if (tk->comment)
+			free(tk->comment);
+		free(tk);
+		return 0;
+	}
+
+	if (len == FY_NT)
+		len = strlen(text);
+
+	data = NULL;
+
+	fyms = fy_memstream_open(&fp);
+	if (!fyms)
+		goto err_out;
+
+	s = text;
+	e = text + len;
+	lastc = -1;
+	fputs("# ", fp);
+	while ((c = fy_utf8_get(s, e - s, &w)) > 0) {
+		s += w;
+		if (lastc == '\n')
+			fputs("\n# ", fp);
+		if (fy_token_is_lb(fyt, c)) {
+			c = '\n';
+		} else {
+			assert((size_t)w <= sizeof(utf8buf));
+			fy_utf8_put_unchecked(utf8buf, c);
+			fwrite(utf8buf, 1, w, fp);
+		}
+		lastc = c;
+	}
+
+	data = fy_memstream_close(fyms, &sz);
+	fyms = NULL;
+
+	len = sz;
+
+	handle = tk ? &tk->handle : fy_token_comment_handle(fyt, which, true);
+	if (!handle)
+		goto err_out;
+
+	fy_input_unref(handle->fyi);
+	fy_atom_reset(handle);
+
+	fyi = fy_input_from_malloc_data(data, len, handle, true);
+	if (!fyi)
+		goto err_out;
+
+	return 0;
+
+err_out:
+	if (fyms) {
+		data = fy_memstream_close(fyms, &sz);
+		fyms = NULL;
+	}
+	fy_input_unref(fyi);
+	if (data)
+		free(data);
+	return -1;
 }
 
 const char *fy_token_get_scalar_path_key(struct fy_token *fyt, size_t *lenp)
@@ -1366,7 +1533,7 @@ const char *fy_token_get_scalar_path_key(struct fy_token *fyt, size_t *lenp)
 			case '\v':
 				fy_emit_accum_utf8_put(&ea, 'v');
 				break;
-			case '\e':
+			case '\x1b':
 				fy_emit_accum_utf8_put(&ea, 'e');
 				break;
 			case 0x85:
@@ -1624,7 +1791,7 @@ char *fy_token_debug_text(struct fy_token *fyt)
 out:
 	text = fy_token_get_text(fyt, &length);
 
-	wlen = length > 8 ? 8 : length;
+	wlen = length > 8 ? 8 : (int)length;
 
 	rc = asprintf(&buf, "%s:%.*s%s", typetxt, wlen, text, wlen < (int)length ? "..." : "");
 	assert(rc != -1);
@@ -2010,38 +2177,41 @@ fy_tag_directive_token_tag(struct fy_token *fyt)
 
 struct fy_atom *fy_token_comment_handle(struct fy_token *fyt, enum fy_comment_placement placement, bool alloc)
 {
-	struct fy_atom *handle;
-	size_t size;
+	struct fy_token_comment *tk;
 
 	if (!fyt || (unsigned int)placement >= fycp_max)
 		return NULL;
 
-	if (!fyt->comment) {
-		if (!alloc)
-			return NULL;
-
-		size = sizeof(*fyt->comment) * fycp_max;
-		fyt->comment = malloc(size);
-		if (!fyt->comment)
-			return NULL;
-		memset(fyt->comment, 0, size);
+	for (tk = fyt->token_comment; tk; tk = tk->next) {
+		if (tk->placement == placement)
+			return &tk->handle;
 	}
-	handle = &fyt->comment[placement];
 
-	return handle;
+	if (!alloc)
+		return NULL;
+
+	tk = malloc(sizeof(*tk));
+	if (!tk)
+		return NULL;
+	memset(tk, 0, sizeof(*tk));
+	tk->placement = placement;
+
+	/* simple list add */
+	tk->next = fyt->token_comment;
+	fyt->token_comment = tk;
+
+	return &tk->handle;
 }
 
 bool fy_token_has_any_comment(struct fy_token *fyt)
 {
-	struct fy_atom *handle;
-	enum fy_comment_placement placement;
+	struct fy_token_comment *tk;
 
-	if (!fyt || !fyt->comment)
+	if (!fyt)
 		return false;
 
-	for (placement = fycp_top; placement <= fycp_bottom; placement++) {
-		handle = &fyt->comment[placement];
-		if (fy_atom_is_set(handle))
+	for (tk = fyt->token_comment; tk; tk = tk->next) {
+		if (fy_atom_is_set(&tk->handle))
 			return true;
 	}
 	return false;

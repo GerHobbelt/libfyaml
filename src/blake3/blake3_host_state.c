@@ -6,19 +6,21 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
 
 #ifdef HAVE_ALLOCA_H
 #include <alloca.h>
 #endif
 
+#ifndef _WIN32
 #include <pthread.h>
-#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#endif
 
 #include "fy-bit64.h"
 
@@ -27,6 +29,7 @@
 #include "blake3_internal.h"
 
 #include "fy-thread.h"
+#include "fy-win32.h"
 
 /* 256K threshold for using alloca */
 #define BLAKE3_ALLOCA_BUFFER_SIZE	(256U << 10)
@@ -458,7 +461,7 @@ int blake3_hash_file(blake3_hasher *hasher, const char *filename,
 		while (left > 0) {
 			chunk = left > max_chunk ? max_chunk : left;
 			blake3_hasher_update(hasher, p, chunk);
-			p += chunk;
+			p = (char *)p + chunk;
 			left -= chunk;
 		}
 	} else {

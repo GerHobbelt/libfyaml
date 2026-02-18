@@ -42,9 +42,28 @@ extern "C" {
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
 #include <unistd.h>
-#endif
-
 #include <sys/uio.h>
+#elif defined(_WIN32)
+/* Windows compatibility definitions */
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+#ifdef _WIN64
+typedef __int64 ssize_t;
+#else
+typedef int ssize_t;
+#endif
+#endif
+/* Windows doesn't have sys/uio.h, provide iovec definition */
+#ifndef _FY_IOVEC_DEFINED
+#define _FY_IOVEC_DEFINED
+struct iovec {
+	void *iov_base;
+	size_t iov_len;
+};
+#endif
+#else
+#include <sys/uio.h>
+#endif
 
 /* opaque types for the user */
 struct fy_token;
@@ -74,10 +93,18 @@ struct fy_document_builder;
 /* NULL terminated string length specifier */
 #define FY_NT	((size_t)-1)
 
+/* DLL export/import macros
+ * Note: On Windows, a .def file (src/lib/fyaml.def) is used to export
+ * public API symbols. The FY_EXPORT macro is kept for GCC visibility.
+ */
 #if defined(__GNUC__) && __GNUC__ >= 4
 #define FY_EXPORT __attribute__ ((visibility ("default")))
 #define FY_DEPRECATED __attribute__ ((deprecated))
 #define FY_FORMAT(_t, _x, _y) __attribute__ ((format(_t, _x, _y)))
+#elif defined(_MSC_VER)
+#define FY_EXPORT /* nothing - exports handled via .def file */
+#define FY_DEPRECATED /* nothing - MSVC __declspec must be prefix */
+#define FY_FORMAT(_t, _x, _y) /* nothing */
 #else
 #define FY_EXPORT /* nothing */
 #define FY_DEPRECATED /* nothing */
@@ -90,6 +117,36 @@ struct fy_document_builder;
  * If the _str pointer is NULL, then NULL will be returned
  */
 #ifndef FY_ALLOCA_COPY_FREE
+#ifdef _MSC_VER
+/*
+ * MSVC doesn't support GCC statement expressions, so we provide
+ * function-based alternatives using thread-local storage.
+ */
+#define FY_ALLOCA_COPY_FREE_BUFSZ 8192
+static __declspec(thread) char fy_alloca_copy_free_buf[FY_ALLOCA_COPY_FREE_BUFSZ];
+
+static __inline const char *fy_alloca_copy_free_impl(char *str, size_t len)
+{
+	size_t actual_len;
+	if (!str)
+		return NULL;
+	actual_len = (len == FY_NT) ? strlen(str) : len;
+	if (actual_len >= FY_ALLOCA_COPY_FREE_BUFSZ)
+		actual_len = FY_ALLOCA_COPY_FREE_BUFSZ - 1;
+	memcpy(fy_alloca_copy_free_buf, str, actual_len);
+	fy_alloca_copy_free_buf[actual_len] = '\0';
+	free(str);
+	return fy_alloca_copy_free_buf;
+}
+
+#define FY_ALLOCA_COPY_FREE(_str, _len) \
+	fy_alloca_copy_free_impl((_str), (size_t)(_len))
+
+#define FY_ALLOCA_COPY_FREE_NO_NULL(_str, _len) \
+	(fy_alloca_copy_free_impl((_str), (size_t)(_len)) ? fy_alloca_copy_free_buf : "")
+
+#else
+/* GCC/Clang version with statement expressions */
 #define FY_ALLOCA_COPY_FREE(_str, _len)				\
         ({							\
                 char *__str = (_str), *__stra = NULL;		\
@@ -105,10 +162,8 @@ struct fy_document_builder;
 		}						\
                 (const char *)__stra;				\
         })
-#endif
 
 /* same as above but when _str == NULL return "" */
-#ifndef FY_ALLOCA_COPY_FREE_NO_NULL
 #define FY_ALLOCA_COPY_FREE_NO_NULL(_str, _len)			\
         ({							\
                 const char *__strb;				\
@@ -118,6 +173,7 @@ struct fy_document_builder;
 			__strb = "";				\
 		__strb;						\
         })
+#endif
 #endif
 
 /**
@@ -1358,22 +1414,6 @@ fy_token_get_text_length(struct fy_token *fyt)
 	FY_EXPORT;
 
 /**
- * fy_token_get_utf8_length() - Get length of the text of a token
- *
- * This method will return the length of the text representation
- * of a token as a utf8 string.
- *
- * @fyt: The token
- *
- * Returns:
- * The size of the utf8 text representation of a token, -1 in case of an error.
- * Note that the NULL token will return a length of zero.
- */
-size_t
-fy_token_get_utf8_length(struct fy_token *fyt)
-	FY_EXPORT;
-
-/**
  * enum fy_comment_placement - Comment placement relative to token
  *
  * @fycp_top: Comment on top of token
@@ -1390,9 +1430,10 @@ enum fy_comment_placement {
 /**
  * fy_token_get_comment() - Get zero terminated comment of a token
  *
+ * Get the comment that is attached at a token having the given
+ * placement.
+ *
  * @fyt: The token out of which the comment text will be returned.
- * @buf: The buffer to be filled with the contents of the token
- * @maxsz: The maximum size of the comment buffer
  * @which: The comment placement
  *
  * Returns:
@@ -1400,8 +1441,86 @@ enum fy_comment_placement {
  * NULL in case of an error or if the token has no comment.
  */
 const char *
-fy_token_get_comment(struct fy_token *fyt, char *buf, size_t maxsz,
-		     enum fy_comment_placement which)
+fy_token_get_comment(struct fy_token *fyt, enum fy_comment_placement which)
+	FY_EXPORT;
+
+/**
+ * fy_token_get_comments() - Get all comments of a token
+ *
+ * Get all the comments that are attached on a token
+ *
+ * @fyt: The token
+ *
+ * Returns:
+ * A pointer to a zero terminated text representation of all the comments.
+ * The comments of all the placements are concatenated and returned as one.
+ * NULL in case of an error or if the event has no comments.
+ */
+const char *
+fy_token_get_comments(struct fy_token *fyt)
+	FY_EXPORT;
+
+/**
+ * fy_token_set_comment() - Attach a comment to a token
+ *
+ * Attach the given comment on the token at the specified placement.
+ * If another comment is already present it will be overriden.
+ * If text is NULL the comment is removed.
+ *
+ * @fyt: The token out of which the comment text will be attached
+ * @which: The placement
+ * @text: The text of the comment
+ * @len: The length of the comment (FY_NT means the length of text)
+ *
+ * Returns:
+ * 0 on success, -1 on failure.
+ */
+int
+fy_token_set_comment(struct fy_token *fyt, enum fy_comment_placement which,
+		     const char *text, size_t len)
+	FY_EXPORT;
+
+/**
+ * fy_event_get_comments() - Get all comments of an event
+ *
+ * @fye: The event
+ *
+ * Returns:
+ * A pointer to a zero terminated text representation of all the comments.
+ * The comments of all the placements are concatenated and returned as one.
+ * NULL in case of an error or if the event has no comments.
+ * The pointer must be free'ed if it's not NULL via a call to free()
+ */
+const char *
+fy_event_get_comments(struct fy_event *fye)
+	FY_EXPORT;
+
+/**
+ * fy_node_get_comment() - Get comment of a node
+ *
+ * @fyn: The node
+ * @placement: The placement of the comment
+ *
+ * Returns:
+ * A pointer to a zero terminated text representation of the comment.
+ * NULL in case of an error or if the event has no such comments.
+ */
+const char *
+fy_node_get_comment(struct fy_node *fyn, enum fy_comment_placement which)
+	FY_EXPORT;
+
+/**
+ * fy_node_get_comments() - Get all comments of a node
+ *
+ * @fyn: The node
+ *
+ * Returns:
+ * A pointer to a zero terminated text representation of all the comments.
+ * The comments of all the placements are concatenated and returned as one.
+ * NULL in case of an error or if the event has no comments.
+ */
+const char *
+fy_node_get_comments(struct fy_node *fyn)
 	FY_EXPORT;
 
 /**
@@ -2661,55 +2780,6 @@ fy_emit_to_string_collect(struct fy_emitter *emit, size_t *sizep)
 	FY_EXPORT;
 
 /**
- * fy_emitter_vlog() - Log using the emitters diagnostics printf style (va_arg)
- *
- * Output a log on the emitter diagnostic output
- *
- * @emit: The emitter
- * @type: The error type
- * @fmt: The printf format string
- * @ap: The argument list
- */
-void
-fy_emitter_vlog(struct fy_emitter *emit, enum fy_error_type type, const char *fmt, va_list ap)
-	FY_EXPORT;
-
-/**
- * fy_emitter_log() - Log using the emitters diagnostics printf style
- *
- * Output a report on the emitter's diagnostics
- *
- * @emit: The emitter
- * @type: The error type
- * @fmt: The printf format string
- * @...: The extra arguments
- */
-void
-fy_emitter_log(struct fy_emitter *emit, enum fy_error_type type, const char *fmt, ...)
-	FY_FORMAT(printf, 3, 4)
-	FY_EXPORT;
-
-#ifndef NDEBUG
-
-#define fy_emitter_debug(_emit, _fmt, ...) \
-	fy_emitter_log((_emit), FYET_DEBUG, (_fmt) , ## __VA_ARGS__)
-#else
-
-#define fy_emitter_debug(_emit, _fmt, ...) \
-	do { } while(0)
-
-#endif
-
-#define fy_emitter_info(_emit, _fmt, ...) \
-	fy_emitter_log((_emit), FYET_INFO, (_fmt) , ## __VA_ARGS__)
-#define fy_emitter_notice(_emit, _fmt, ...) \
-	fy_emitter_log((_emit), FYET_NOTICE, (_fmt) , ## __VA_ARGS__)
-#define fy_emitter_warning(_emit, _fmt, ...) \
-	fy_emitter_log((_emit), FYET_WARNING, (_fmt) , ## __VA_ARGS__)
-#define fy_emitter_error(_emit, _fmt, ...) \
-	fy_emitter_log((_emit), FYET_ERROR, (_fmt) , ## __VA_ARGS__)
-
-/**
  * fy_node_copy() - Copy a node, associating the new node with the given document
  *
  * Make a deep copy of a node, associating the copy with the given document.
@@ -3386,6 +3456,24 @@ fy_node_get_type(struct fy_node *fyn)
  */
 enum fy_node_style
 fy_node_get_style(struct fy_node *fyn)
+	FY_EXPORT;
+
+/**
+ * fy_node_set_style() - Set the node style
+ *
+ * Try to set the node rendering style of a node.
+ * If the style of node is illegal (for example
+ * you can't set an arbitrary scalar that contains
+ * zeroes to plain) then the actual style that was
+ * set will be returned.
+ *
+ * @fyn: The node
+ *
+ * Returns:
+ * The final node style
+ */
+enum fy_node_style
+fy_node_set_style(struct fy_node *fyn, enum fy_node_style style)
 	FY_EXPORT;
 
 /**
@@ -5851,6 +5939,20 @@ fy_diag_set_collect_errors(struct fy_diag *diag, bool collect_errors)
 	FY_EXPORT;
 
 /**
+ * fy_diag_get_collect_errors() - Get collect errors state
+ *
+ * Get the collect errors mode.
+ *
+ * @diag: The diagnostic object
+ *
+ * Returns:
+ * true collecting errors, false otherwise
+ */
+bool
+fy_diag_get_collect_errors(struct fy_diag *diag)
+	FY_EXPORT;
+
+/**
  * fy_diag_cfg_default() - Fill in the configuration structure
  * 			   with defaults
  *
@@ -5989,6 +6091,20 @@ fy_diagf(struct fy_diag *diag, const struct fy_diag_ctx *fydc,
 	FY_FORMAT(printf, 3, 4)
 	FY_EXPORT;
 
+#ifdef _MSC_VER
+/* MSVC doesn't support GCC statement expressions, use do-while(0) instead */
+#define fy_diag_diag(_diag, _level, _fmt, ...) \
+	do { \
+		struct fy_diag_ctx _ctx; \
+		memset(&_ctx, 0, sizeof(_ctx)); \
+		_ctx.level = (_level); \
+		_ctx.module = FYEM_UNKNOWN; \
+		_ctx.source_func = __func__; \
+		_ctx.source_file = __FILE__; \
+		_ctx.source_line = __LINE__; \
+		fy_diagf((_diag), &_ctx, (_fmt) , ## __VA_ARGS__); \
+	} while(0)
+#else
 #define fy_diag_diag(_diag, _level, _fmt, ...) \
 	({ \
 		struct fy_diag_ctx _ctx = { \
@@ -6003,6 +6119,7 @@ fy_diagf(struct fy_diag *diag, const struct fy_diag_ctx *fydc,
 		}; \
 		fy_diagf((_diag), &_ctx, (_fmt) , ## __VA_ARGS__); \
 	})
+#endif
 
 #ifndef NDEBUG
 
@@ -6251,63 +6368,6 @@ fy_diag_event_report(struct fy_diag *diag, struct fy_event *fye,
 		     enum fy_event_part fyep, enum fy_error_type type,
 		     const char *fmt, ...)
 	FY_FORMAT(printf, 5, 6)
-	FY_EXPORT;
-
-/**
- * fy_diag_event_override_vreport() - Report about a token vprintf style,
- *				      overriding file, line and column info using
- * 				      the given diagnostic object
- *
- * Output a report about the given event part via the specific
- * error type. This method will use the overrides provided in order
- * to massage the reporting information.
- * If @file is NULL, no file location will be reported.
- * If either @line or @column is negative no location will be reported.
- *
- * @diag: The diag object
- * @fye: The event
- * @fyep: The event part
- * @type: The error type
- * @file: The file override
- * @line: The line override
- * @column: The column override
- * @fmt: The printf format string
- * @ap: The argument list
- */
-void
-fy_diag_event_override_vreport(struct fy_diag *diag, struct fy_event *fye,
-			       enum fy_event_part fyep, enum fy_error_type type,
-			       const char *file, int line, int column,
-			       const char *fmt, va_list ap)
-	FY_EXPORT;
-
-/**
- * fy_diag_event_override_report() - Report about a token printf style,
- * 				     overriding file, line and column info using
- * 				     the given diagnostic object
- *
- * Output a report about the given event part via the specific
- * error type. This method will use the overrides provided in order
- * to massage the reporting information.
- * If @file is NULL, no file location will be reported.
- * If either @line or @column is negative no location will be reported.
- *
- * @diag: The diag object
- * @fyt: The event
- * @fyep: The event part
- * @type: The error type
- * @file: The file override
- * @line: The line override
- * @column: The column override
- * @fmt: The printf format string
- * @...: The extra arguments.
- */
-void
-fy_diag_event_override_report(struct fy_diag *diag, struct fy_token *fyt,
-			      enum fy_event_part fyep, enum fy_error_type type,
-			      const char *file, int line, int column,
-			      const char *fmt, ...)
-	FY_FORMAT(printf, 8, 9)
 	FY_EXPORT;
 
 /**
