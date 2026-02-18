@@ -34,7 +34,9 @@ libfyaml_la_SOURCES = \
 	lib/fy-accel.c lib/fy-accel.h \
 	lib/fy-walk.c lib/fy-walk.h \
 	lib/fy-path.c lib/fy-path.h \
-	lib/fy-composer.c lib/fy-composer.h
+	lib/fy-composer.c lib/fy-composer.h \
+	lib/fy-parse-diag.c lib/fy-input-diag.c lib/fy-doc-diag.c \
+	lib/fy-docbuilder-diag.c lib/fy-composer-diag.c
 
 # util
 libfyaml_la_SOURCES += \
@@ -137,9 +139,14 @@ endif
 libfyaml_la_LIBADD += libb3neon.la
 endif
 
-# libfyaml-parser needs both LIBYAML and static
+if HAVE_LIBCLANG
+libfyaml_la_CPPFLAGS += $(LIBCLANG_CPPFLAGS)
+libfyaml_la_CFLAGS += $(LIBCLANG_CFLAGS)
+libfyaml_la_LDFLAGS += $(LIBCLANG_LDFLAGS) $(LIBCLANG_LIBS)
+endif
+
 if HAVE_LIBYAML
-if HAVE_STATIC
+if !CROSS_COMPILING
 
 noinst_PROGRAMS += libfyaml-parser
 
@@ -155,8 +162,7 @@ libfyaml_parser_LDFLAGS = $(AM_LDFLAGS) -static
 endif
 endif
 
-# fy-thread
-if HAVE_STATIC
+if !CROSS_COMPILING
 
 noinst_PROGRAMS += fy-thread
 
@@ -171,8 +177,7 @@ fy_thread_CFLAGS = $(AM_CFLAGS) $(LIBYAML_CFLAGS)
 fy_thread_LDFLAGS = $(AM_LDFLAGS) -static
 endif
 
-# fy-b3sum
-if HAVE_STATIC
+if !CROSS_COMPILING
 
 noinst_PROGRAMS += fy-b3sum
 
@@ -187,8 +192,7 @@ fy_b3sum_CFLAGS = $(AM_CFLAGS) $(LIBYAML_CFLAGS)
 fy_b3sum_LDFLAGS = $(AM_LDFLAGS) -static
 endif
 
-# fy-allocators
-if HAVE_STATIC
+if !CROSS_COMPILING
 
 noinst_PROGRAMS += fy-allocators
 
@@ -207,12 +211,15 @@ bin_PROGRAMS += fy-tool
 
 fy_tool_SOURCES = \
 	tool/fy-tool.c \
+	tool/fy-tool-util.c \
+	tool/fy-tool-dump.c \
+	tool/fy-tool-util.h \
 	valgrind/fy-valgrind.h
 
 fy_tool_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src/valgrind
 fy_tool_LDADD = $(AM_LDADD) libfyaml.la
-fy_tool_CFLAGS = $(AM_CFLAGS) $(STATIC_TOOLS_CFLAGS)
-fy_tool_LDFLAGS = $(AM_LDFLAGS) $(STATIC_TOOLS_LDFLAGS)
+fy_tool_CFLAGS = $(AM_CFLAGS)
+fy_tool_LDFLAGS = $(AM_LDFLAGS)
 
 include_HEADERS = \
         $(top_srcdir)/include/libfyaml.h

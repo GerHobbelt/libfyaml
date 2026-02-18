@@ -1454,7 +1454,7 @@ fy_parse_document_load_scalar(struct fy_parser *fyp, struct fy_document *fyd,
 		fyn->scalar = fye->alias.anchor;
 		fye->alias.anchor = NULL;
 	} else
-		assert(0);
+		FY_IMPOSSIBLE_ABORT();
 
 	*fynp = fyn;
 	fyn = NULL;
@@ -3560,6 +3560,23 @@ const char *fy_node_get_tag(struct fy_node *fyn, size_t *lenp)
 	}
 
 	return fy_token_get_text(fyn->tag, lenp);
+}
+
+const char *fy_node_get_tag0(struct fy_node *fyn)
+{
+	if (!fyn || !fyn->tag)
+		return NULL;
+
+	return fy_token_get_text0(fyn->tag);
+}
+
+size_t fy_node_get_tag_length(struct fy_node *fyn)
+{
+
+	if (!fyn || !fyn->tag)
+		return 0;
+
+	return fy_token_get_text_length(fyn->tag);
 }
 
 const char *fy_node_get_scalar(struct fy_node *fyn, size_t *lenp)
@@ -7402,8 +7419,7 @@ fydi_push_collection(struct fy_document_iterator *fydi, struct fy_node *fyn)
 		break;
 
 	default:
-		assert(0);
-		break;
+		FY_IMPOSSIBLE_ABORT();
 	}
 
 	return true;
