@@ -51,7 +51,7 @@
 #define STRIP_LABELS_DEFAULT		false
 #define STRIP_TAGS_DEFAULT		false
 #define STRIP_DOC_DEFAULT		false
-#define STREAMING_DEFAULT		false
+#define STREAMING_DEFAULT		true
 #define RECREATING_DEFAULT		false
 #define JSON_DEFAULT			"auto"
 #define DISABLE_ACCEL_DEFAULT		false
@@ -69,6 +69,7 @@
 #define ALLOW_DUPLICATE_KEYS_DEFAULT	false
 #define STRIP_EMPTY_KV_DEFAULT		false
 #define TSV_FORMAT_DEFAULT		false
+#define NO_ENDING_NEWLINE_DEFAULT	false
 
 #define OPT_DUMP			1000
 #define OPT_TESTSUITE			1001
@@ -87,7 +88,7 @@
 #define OPT_STRIP_TAGS			2001
 #define OPT_STRIP_DOC			2002
 #define OPT_STREAMING			2003
-#define OPT_RECREATING          2004
+#define OPT_RECREATING			2004
 #define OPT_DISABLE_ACCEL		2005
 #define OPT_DISABLE_BUFFERING		2006
 #define OPT_DISABLE_DEPTH_LIMIT		2007
@@ -107,6 +108,8 @@
 #define OPT_TSV_FORMAT			2021
 #define OPT_DISABLE_DOC_MARKERS		2022
 #define OPT_DISABLE_SCALAR_STYLES	2023
+#define OPT_NO_STREAMING		2024
+#define OPT_NO_ENDING_NEWLINE		2025
 
 #define OPT_DISABLE_DIAG		3000
 #define OPT_ENABLE_DIAG			3001
@@ -161,15 +164,16 @@ static struct option lopts[] = {
 	{"strip-tags",		no_argument,		0,	OPT_STRIP_TAGS },
 	{"strip-doc",		no_argument,		0,	OPT_STRIP_DOC },
 	{"streaming",		no_argument,		0,	OPT_STREAMING },
+	{"no-streaming",	no_argument,		0,	OPT_NO_STREAMING },
 	{"recreating",		no_argument,		0,	OPT_RECREATING },
 	{"disable-accel",	no_argument,		0,	OPT_DISABLE_ACCEL },
 	{"disable-buffering",	no_argument,		0,	OPT_DISABLE_BUFFERING },
 	{"disable-depth-limit",	no_argument,		0,	OPT_DISABLE_DEPTH_LIMIT },
 	{"disable-mmap",	no_argument,		0,	OPT_DISABLE_MMAP },
 	{"disable-diag",	required_argument,	0,	OPT_DISABLE_DIAG },
-	{"enable-diag", 	required_argument,	0,	OPT_ENABLE_DIAG },
+	{"enable-diag",		required_argument,	0,	OPT_ENABLE_DIAG },
 	{"show-diag",		required_argument,	0,	OPT_SHOW_DIAG },
-	{"hide-diag", 		required_argument,	0,	OPT_HIDE_DIAG },
+	{"hide-diag",		required_argument,	0,	OPT_HIDE_DIAG },
 	{"yaml-1.1",		no_argument,		0,	OPT_YAML_1_1 },
 	{"yaml-1.2",		no_argument,		0,	OPT_YAML_1_2 },
 	{"yaml-1.3",		no_argument,		0,	OPT_YAML_1_3 },
@@ -183,6 +187,7 @@ static struct option lopts[] = {
 	{"document-event-stream",no_argument,		0,	OPT_DOCUMENT_EVENT_STREAM },
 	{"noexec",		no_argument,		0,	OPT_NOEXEC },
 	{"null-output",		no_argument,		0,	OPT_NULL_OUTPUT },
+	{"no-ending-newline",	no_argument,		0,	OPT_NO_ENDING_NEWLINE },
 	{"collect-errors",	no_argument,		0,	OPT_COLLECT_ERRORS },
 	{"allow-duplicate-keys",no_argument,		0,	OPT_ALLOW_DUPLICATE_KEYS },
 	{"strip-empty-kv",	no_argument,		0,	OPT_STRIP_EMPTY_KV },
@@ -206,7 +211,7 @@ static struct option lopts[] = {
 
 	{"help",		no_argument,		0,	'h' },
 	{"version",		no_argument,		0,	'v' },
-	{0,			0,              	0,	 0  },
+	{0,			0,			0,	 0  },
 };
 
 static void display_usage(FILE *fp, char *progname, int tool_mode)
@@ -227,7 +232,7 @@ static void display_usage(FILE *fp, char *progname, int tool_mode)
 	fprintf(fp, "\t--indent, -i <indent>    : Set dump indent to <indent>"
 						" (default indent %d)\n",
 						INDENT_DEFAULT);
-	fprintf(fp, "\t--width, -w <width>      : Set dump width to <width>"
+	fprintf(fp, "\t--width, -w <width>      : Set dump width to <width> - inf for infinite"
 						" (default width %d)\n",
 						WIDTH_DEFAULT);
 	fprintf(fp, "\t--resolve, -r            : Perform anchor and merge key resolution"
@@ -275,6 +280,7 @@ static void display_usage(FILE *fp, char *progname, int tool_mode)
 	fprintf(fp, "\t--ypath-aliases          : Use YPATH aliases (default %s)\n",
 						YPATH_ALIASES_DEFAULT ? "true" : "false");
 	fprintf(fp, "\t--null-output            : Do not generate output (for scanner profiling)\n");
+	fprintf(fp, "\t--no-ending-newline      : Do not generate a final newline\n");
 	fprintf(fp, "\t--collect-errors         : Collect errors instead of outputting directly"
 						" (default %s)\n",
 						COLLECT_ERRORS_DEFAULT ? "true" : "false");
@@ -317,9 +323,8 @@ static void display_usage(FILE *fp, char *progname, int tool_mode)
 							" (default %s)\n",
 							TSV_FORMAT_DEFAULT ? "true" : "false");
 		if (tool_mode == OPT_TOOL || tool_mode == OPT_DUMP) {
-			fprintf(fp, "\t--streaming              : Use streaming output mode"
-								" (default %s)\n",
-								STREAMING_DEFAULT ? "true" : "false");
+			fprintf(fp, "\t--streaming              : Use streaming output mode (default)");
+			fprintf(fp, "\t--no-streaming           : Don't use streaming output mode");
 			fprintf(fp, "\t--recreating             : Recreate streaming events"
 								" (default %s)\n",
 								RECREATING_DEFAULT ? "true" : "false");
@@ -870,12 +875,12 @@ static int do_b3sum_check_file(struct fy_blake3_hasher *hasher, const char *chec
 
 		length = 0;
 		s = linebuf;
-		while (isxdigit(*s))
+		while (isxdigit((unsigned char)*s))
 			s++;
 
 		length = s - linebuf;
 
-		if (length == 0 || length > (FY_BLAKE3_OUT_LEN * 2) || (length % 1) || !isspace(*s)) {
+		if (length == 0 || length > (FY_BLAKE3_OUT_LEN * 2) || (length % 1) || !isspace((unsigned char)*s)) {
 			fprintf(stderr, "Bad line found at file \"%s\" line #%d\n", check_filename, line);
 			fprintf(stderr, "%s\n", linebuf);
 			goto err_out;
@@ -883,7 +888,7 @@ static int do_b3sum_check_file(struct fy_blake3_hasher *hasher, const char *chec
 
 		*s++ = '\0';
 
-		while (isspace(*s))
+		while (isspace((unsigned char)*s))
 			s++;
 
 		length >>= 1;	/* to bytes */
@@ -1164,7 +1169,7 @@ int main(int argc, char *argv[])
 		       FYEXCF_COLOR_NONE) |
 		      FYEXCF_OUTPUT_STDOUT;
 
-	while ((opt = getopt_long_only(argc, argv,
+	while ((opt = getopt_long(argc, argv,
 					"I:" "d:" "i:" "w:" "rsc" "C:" "m:" "V" "f:" "t:" "T:F:" "j:" "qhvl",
 					lopts, &lidx)) != -1) {
 		switch (opt) {
@@ -1183,17 +1188,21 @@ int main(int argc, char *argv[])
 			break;
 		case 'i':
 			indent = atoi(optarg);
-			if (indent < 0 || indent > FYECF_INDENT_MASK) {
+			if (indent <= 0 || indent > FYECF_INDENT_MASK) {
 				fprintf(stderr, "bad indent option %s\n", optarg);
 				goto err_out_usage;
 			}
 
 			break;
 		case 'w':
-			width = atoi(optarg);
-			if (width < 0 || width > FYECF_WIDTH_MASK) {
-				fprintf(stderr, "bad width option %s\n", optarg);
-				goto err_out_usage;
+			if (!strcmp(optarg, "inf")) {
+				width = 0;	/* infinite */
+			} else {
+				width = atoi(optarg);
+				if (width <= 8 || width > FYECF_WIDTH_MASK) {			/* it should fit %YAML 1.3 at least */
+					fprintf(stderr, "bad width option %s\n", optarg);
+					goto err_out_usage;
+				}
 			}
 			manual_width = true;
 			break;
@@ -1327,6 +1336,9 @@ int main(int argc, char *argv[])
 		case OPT_STREAMING:
 			streaming = true;
 			break;
+		case OPT_NO_STREAMING:
+			streaming = false;
+			break;
 		case OPT_RECREATING:
 			recreating = true;
 			break;
@@ -1367,6 +1379,10 @@ int main(int argc, char *argv[])
 			break;
 		case OPT_NULL_OUTPUT:
 			null_output = true;
+			emit_xflags |= FYEXCF_NULL_OUTPUT;
+			break;
+		case OPT_NO_ENDING_NEWLINE:
+			emit_flags |= FYECF_NO_ENDING_NEWLINE;
 			break;
 		case OPT_YAML_1_1:
 			cfg.flags &= ~(FYPCF_DEFAULT_VERSION_MASK << FYPCF_DEFAULT_VERSION_SHIFT);
@@ -1559,8 +1575,10 @@ int main(int argc, char *argv[])
 		/* if we're dumping to a non tty stdout width is infinite */
 		if (tool_mode == OPT_DUMP && !isatty(fileno(stdout)) && !manual_width)
 			emit_width_flags = FYECF_WIDTH_INF;
-		else
+		else if (width > 0)
 			emit_width_flags = FYECF_WIDTH(width);
+		else
+			emit_width_flags = FYECF_WIDTH_INF;
 
 		memset(&emit_xcfg, 0, sizeof(emit_xcfg));
 		emit_xcfg.cfg.flags = emit_flags | emit_width_flags |
@@ -2161,6 +2179,9 @@ cleanup:
 		}
 		fy_diag_destroy(diag);
 	}
+
+	/* make valgrind happy */
+	fy_shutdown();
 
 	return exitcode;
 

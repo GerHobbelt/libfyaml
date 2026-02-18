@@ -20,7 +20,11 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+
+#ifdef HAVE_ALLOCA_H
 #include <alloca.h>
+#endif
+
 #include <stdbool.h>
 #include <getopt.h>
 #include <ctype.h>
@@ -233,12 +237,12 @@ static int do_check_file(struct blake3_hasher *hasher, const char *check_filenam
 
 		length = 0;
 		s = linebuf;
-		while (isxdigit(*s))
+		while (isxdigit((unsigned char)*s))
 			s++;
 
 		length = s - linebuf;
 
-		if (length == 0 || length > (BLAKE3_OUT_LEN * 2) || (length % 1) || !isspace(*s)) {
+		if (length == 0 || length > (BLAKE3_OUT_LEN * 2) || (length % 1) || !isspace((unsigned char)*s)) {
 			fprintf(stderr, "Bad line found at file \"%s\" line #%d\n", check_filename, line);
 			fprintf(stderr, "%s\n", linebuf);
 			goto err_out;
@@ -246,7 +250,7 @@ static int do_check_file(struct blake3_hasher *hasher, const char *check_filenam
 
 		*s++ = '\0';
 
-		while (isspace(*s))
+		while (isspace((unsigned char)*s))
 			s++;
 
 		length >>= 1;	/* to bytes */
@@ -316,7 +320,7 @@ int main(int argc, char *argv[])
 	uint8_t key[BLAKE3_OUT_LEN];
 	ssize_t rdn;
 
-	while ((opt = getopt_long_only(argc, argv, "cl:b:dh", lopts, &lidx)) != -1) {
+	while ((opt = getopt_long(argc, argv, "cl:b:dh", lopts, &lidx)) != -1) {
 		switch (opt) {
 
 		case OPT_DERIVE_KEY:

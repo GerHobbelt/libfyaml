@@ -20,7 +20,11 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+
+#ifdef HAVE_ALLOCA_H
 #include <alloca.h>
+#endif
+
 #include <stdbool.h>
 #include <getopt.h>
 #include <ctype.h>
@@ -137,7 +141,7 @@ static int allocator_test(const char *allocator, const char *parent_allocator, s
 
 	fprintf(stderr, "Allocating %u integers\n", (unsigned int)ARRAY_SIZE(uintp));
 	for (i = 0; i < ARRAY_SIZE(uintp); i++) {
-		uintp[i] = fy_allocator_alloc(a, tag0, sizeof(unsigned int), alignof(unsigned int));
+		uintp[i] = fy_allocator_alloc(a, tag0, sizeof(unsigned int), _Alignof(unsigned int));
 		assert(uintp[i] != NULL);
 		fprintf(stderr, "\t%u: %p\n", i, uintp[i]);
 	}
@@ -257,7 +261,7 @@ int main(int argc, char *argv[])
 	const char *parent_allocator = "linear";
 	size_t size = 0;
 
-	while ((opt = getopt_long_only(argc, argv, "a:p:s:h", lopts, &lidx)) != -1) {
+	while ((opt = getopt_long(argc, argv, "a:p:s:h", lopts, &lidx)) != -1) {
 		switch (opt) {
 		case 'a':
 		case 'p':

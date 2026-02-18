@@ -52,9 +52,17 @@ include(CheckFunctionExists)
 include(CheckCSourceCompiles)
 include(CheckCCompilerFlag)
 include(CheckLibraryExists)
+include(CheckSymbolExists)
 include(CMakeDependentOption)
 include(CTest)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckLibClang.cmake)
+
+# does this CMake version understand generator expressions?
+if(${CMAKE_VERSION} VERSION_LESS "3.27")
+    set(HAVE_CMAKE_GEXPR 0)
+else()
+    set(HAVE_CMAKE_GEXPR 1)
+endif()
 
 # Macro to add libclang support to a target
 macro(add_libclang_to_target target_name link_scope)
@@ -77,7 +85,7 @@ macro(add_libclang_to_target target_name link_scope)
         endif()
 
         # Add libclang libraries
-        target_link_libraries(${target_name} ${link_scope} ${LIBCLANG_LIBS})
+	target_link_libraries(${target_name} ${link_scope} ${LIBCLANG_LIBS})
     endif()
 endmacro()
 
@@ -140,6 +148,7 @@ if(NOT CMAKE_USE_PTHREADS_INIT)
 endif()
 
 # Check for headers and functions
+check_include_file("alloca.h" HAVE_ALLOCA_H)
 check_include_file("byteswap.h" HAVE_BYTESWAP_H)
 check_function_exists(__builtin_bswap16 HAVE___BUILTIN_BSWAP16)
 check_function_exists(__builtin_bswap32 HAVE___BUILTIN_BSWAP32)
@@ -185,15 +194,24 @@ if(BUILD_TESTING)
         set(HAVE_CHECK 1)
         set(CHECK_LIBRARIES check)
         get_target_property(CHECK_INCLUDE_DIRS check INTERFACE_INCLUDE_DIRECTORIES)
+        # Get library location to extract directory
+        get_target_property(CHECK_LIB_LOCATION check IMPORTED_LOCATION)
+        if(NOT CHECK_LIB_LOCATION)
+            get_target_property(CHECK_LIB_LOCATION check LOCATION)
+        endif()
+        if(CHECK_LIB_LOCATION)
+            get_filename_component(CHECK_LIBRARY_DIRS "${CHECK_LIB_LOCATION}" DIRECTORY)
+        endif()
         message(STATUS "Found check framework via CMake config")
 
         # Check if libcheck has srunner_set_tap (jessie has outdated libcheck)
         set(_TEMP_CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES}")
         set(_TEMP_CMAKE_REQUIRED_INCLUDES  "${CMAKE_REQUIRED_INCLUDES}")
-        set(CMAKE_REQUIRED_LIBRARIES ${CHECK_LIBRARIES})
+        # For CMake config targets, use the target directly
+        set(CMAKE_REQUIRED_LIBRARIES check)
         set(CMAKE_REQUIRED_INCLUDES ${CHECK_INCLUDE_DIRS})
 
-        check_library_exists("${CHECK_LIBRARIES}" srunner_set_tap "" HAVE_SRUNNER_SET_TAP)
+        check_symbol_exists(srunner_set_tap "check.h" HAVE_SRUNNER_SET_TAP)
 
         set(CMAKE_REQUIRED_LIBRARIES "${_TEMP_CMAKE_REQUIRED_LIBRARIES}")
         set(CMAKE_REQUIRED_INCLUDES  "${_TEMP_CMAKE_REQUIRED_INCLUDES}")
@@ -215,15 +233,22 @@ if(BUILD_TESTING)
                 # Check if libcheck has srunner_set_tap (jessie has outdated libcheck)
                 set(_TEMP_CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES}")
                 set(_TEMP_CMAKE_REQUIRED_INCLUDES  "${CMAKE_REQUIRED_INCLUDES}")
+                set(_TEMP_CMAKE_REQUIRED_LINK_OPTIONS "${CMAKE_REQUIRED_LINK_OPTIONS}")
                 set(CMAKE_REQUIRED_LIBRARIES ${CHECK_LIBRARIES})
                 set(CMAKE_REQUIRED_INCLUDES ${CHECK_INCLUDE_DIRS})
+                # Add library directories to linker flags
+                foreach(libdir ${CHECK_LIBRARY_DIRS})
+                    list(APPEND CMAKE_REQUIRED_LINK_OPTIONS "-L${libdir}")
+                endforeach()
 
-                check_library_exists("${CHECK_LIBRARIES}" srunner_set_tap "" HAVE_SRUNNER_SET_TAP)
+                check_symbol_exists(srunner_set_tap "check.h" HAVE_SRUNNER_SET_TAP)
 
                 set(CMAKE_REQUIRED_LIBRARIES "${_TEMP_CMAKE_REQUIRED_LIBRARIES}")
                 set(CMAKE_REQUIRED_INCLUDES  "${_TEMP_CMAKE_REQUIRED_INCLUDES}")
+                set(CMAKE_REQUIRED_LINK_OPTIONS "${_TEMP_CMAKE_REQUIRED_LINK_OPTIONS}")
                 unset(_TEMP_CMAKE_REQUIRED_LIBRARIES)
                 unset(_TEMP_CMAKE_REQUIRED_INCLUDES)
+                unset(_TEMP_CMAKE_REQUIRED_LINK_OPTIONS)
 
                 if(HAVE_SRUNNER_SET_TAP)
                     set(HAVE_COMPATIBLE_CHECK 1)
@@ -241,121 +266,127 @@ set(LIBCLANG_LIBS "")
 set(LIBCLANG_FOUND FALSE)
 set(LIBCLANG_DETECTION_METHOD "")
 
+if(NOT HAVE_CMAKE_GEXPR)
+    message(STATUS "libclang support disabled (CMake version is too old (<=3.27)")
+    set(ENABLE_LIBCLANG OFF CACHE BOOL "Disable my feature" FORCE)
+endif()
+
 if(NOT ENABLE_LIBCLANG)
     message(STATUS "libclang support disabled (ENABLE_LIBCLANG=OFF)")
 else()
 
-# If user specified LLVM_ROOT, add it to CMAKE_PREFIX_PATH for this search
-if(LLVM_ROOT)
-    message(STATUS "Using user-specified LLVM_ROOT: ${LLVM_ROOT}")
-    list(PREPEND CMAKE_PREFIX_PATH "${LLVM_ROOT}")
-endif()
-
-# Try CMake config mode first
-find_package(LLVM QUIET CONFIG)
-
-# If LLVM was found, help CMake find Clang in the same installation
-if(LLVM_FOUND)
-    # Clang's config is typically in ${LLVM_INSTALL_PREFIX}/lib/cmake/clang
-    set(Clang_DIR "${LLVM_INSTALL_PREFIX}/lib/cmake/clang")
-endif()
-
-find_package(Clang QUIET CONFIG)
-
-if(LLVM_FOUND AND Clang_FOUND)
-    message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} via CMake config")
-    message(STATUS "  LLVM_INSTALL_PREFIX: ${LLVM_INSTALL_PREFIX}")
-    message(STATUS "  LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
-
-    # Use LLVM's CMake variables directly
-    set(LIBCLANG_CFLAGS_LIST ${LLVM_DEFINITIONS})
-    list(APPEND LIBCLANG_CFLAGS_LIST "-I${LLVM_INCLUDE_DIRS}")
-    list(APPEND LIBCLANG_CFLAGS_LIST "-I${CLANG_INCLUDE_DIRS}")
-
-    # Set up library directories
-    set(LIBCLANG_LINK_DIRS ${LLVM_LIBRARY_DIRS})
-
-    # Link against libclang (C API) and LLVM core libs
-    # Need to link against LLVM core for LLVMShutdown() and other LLVM APIs
-    if(TARGET libclang)
-        set(LIBCLANG_LIBS_LIST libclang LLVM)
-    else()
-        set(LIBCLANG_LIBS_LIST clang LLVM)
+    # If user specified LLVM_ROOT, add it to CMAKE_PREFIX_PATH for this search
+    if(LLVM_ROOT)
+        message(STATUS "Using user-specified LLVM_ROOT: ${LLVM_ROOT}")
+        list(PREPEND CMAKE_PREFIX_PATH "${LLVM_ROOT}")
     endif()
 
-    set(LIBCLANG_INCLUDES "${LLVM_INCLUDE_DIRS};${CLANG_INCLUDE_DIRS}")
-    set(LIBCLANG_FOUND TRUE)
-    set(LIBCLANG_DETECTION_METHOD "CMake config")
-elseif(NOT CROSS_COMPILING)
-    # Fallback to llvm-config method (only when not cross-compiling)
-    message(STATUS "LLVM CMake config not found, trying llvm-config")
+    # Try CMake config mode first
+    find_package(LLVM QUIET CONFIG)
 
-    # Try to find llvm-config (versions 20 down to 10)
-    set(LLVM_CONFIG_NAMES llvm-config)
-    foreach(ver RANGE 20 10 -1)
-        list(APPEND LLVM_CONFIG_NAMES llvm-config-${ver})
-    endforeach()
-
-    find_program(LLVM_CONFIG NAMES ${LLVM_CONFIG_NAMES})
-
-    if(LLVM_CONFIG)
-        execute_process(COMMAND ${LLVM_CONFIG} --cflags OUTPUT_VARIABLE LIBCLANG_CFLAGS_TEMP OUTPUT_STRIP_TRAILING_WHITESPACE)
-        execute_process(COMMAND ${LLVM_CONFIG} --ldflags OUTPUT_VARIABLE LIBCLANG_LDFLAGS_TEMP OUTPUT_STRIP_TRAILING_WHITESPACE)
-        execute_process(COMMAND ${LLVM_CONFIG} --libs OUTPUT_VARIABLE LLVM_LIBS_TEMP OUTPUT_STRIP_TRAILING_WHITESPACE)
-        execute_process(COMMAND ${LLVM_CONFIG} --system-libs OUTPUT_VARIABLE LLVM_SYSLIBS_TEMP OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-        set(LIBCLANG_CFLAGS_LIST "${LIBCLANG_CFLAGS_TEMP} ${LIBCLANG_LDFLAGS_TEMP}")
-        set(LIBCLANG_LIBS_LIST "-lclang;${LLVM_LIBS_TEMP};${LLVM_SYSLIBS_TEMP}")
-        set(LIBCLANG_CFLAGS "${LIBCLANG_CFLAGS_TEMP}")
-        set(LIBCLANG_LDFLAGS "${LIBCLANG_LDFLAGS_TEMP}")
-        set(LIBCLANG_FOUND TRUE)
-        set(LIBCLANG_DETECTION_METHOD "llvm-config: ${LLVM_CONFIG}")
-    endif()
-else()
-    message(STATUS "Cross-compiling: LLVM CMake config not found")
-    message(STATUS "  Set LLVM_ROOT to LLVM install directory (e.g., /usr/lib/llvm-18)")
-    message(STATUS "  Or set CMAKE_PREFIX_PATH or LLVM_DIR to the directory containing LLVMConfig.cmake")
-endif()
-
-# Test if libclang actually works (single test for all detection methods)
-if(LIBCLANG_FOUND)
-    if(NOT CROSS_COMPILING)
-        check_libclang_works(LIBCLANG_WORKS
-            CFLAGS "${LIBCLANG_CFLAGS_LIST}"
-            INCLUDES "${LIBCLANG_INCLUDES}"
-            LINK_DIRS "${LIBCLANG_LINK_DIRS}"
-            LIBRARIES "${LIBCLANG_LIBS_LIST}"
-        )
-    else()
-        # When cross-compiling, disable libclang by default to avoid linking host libraries
-        # User can set LLVM_ROOT, CMAKE_PREFIX_PATH, or LLVM_DIR to point to target-specific LLVM installation
-        message(STATUS "Cross-compiling: disabling libclang")
-        message(STATUS "  To enable, set LLVM_ROOT or CMAKE_PREFIX_PATH to target LLVM installation")
-        set(LIBCLANG_WORKS FALSE)
+    # If LLVM was found, help CMake find Clang in the same installation
+    if(LLVM_FOUND)
+        # Clang's config is typically in ${LLVM_INSTALL_PREFIX}/lib/cmake/clang
+        set(Clang_DIR "${LLVM_INSTALL_PREFIX}/lib/cmake/clang")
     endif()
 
-    if(LIBCLANG_WORKS)
-        set(HAVE_LIBCLANG 1)
-        # Convert list to string for LIBCLANG_CFLAGS if needed (CMake config path)
-        if(LIBCLANG_DETECTION_METHOD STREQUAL "CMake config")
-            string(REPLACE ";" " " LIBCLANG_CFLAGS "${LIBCLANG_CFLAGS_LIST}")
+    find_package(Clang QUIET CONFIG)
+
+    if(LLVM_FOUND AND Clang_FOUND)
+
+        message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} via CMake config")
+        message(STATUS "  LLVM_INSTALL_PREFIX: ${LLVM_INSTALL_PREFIX}")
+        message(STATUS "  LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
+
+        # Use LLVM's CMake variables directly
+        set(LIBCLANG_CFLAGS_LIST ${LLVM_DEFINITIONS})
+        list(APPEND LIBCLANG_CFLAGS_LIST "-I${LLVM_INCLUDE_DIRS}")
+        list(APPEND LIBCLANG_CFLAGS_LIST "-I${CLANG_INCLUDE_DIRS}")
+
+        # Set up library directories
+        set(LIBCLANG_LINK_DIRS ${LLVM_LIBRARY_DIRS})
+
+        # Link against libclang (C API) and LLVM core libs
+        # Need to link against LLVM core for LLVMShutdown() and other LLVM APIs
+        if(TARGET libclang)
+            set(LIBCLANG_LIBS_LIST libclang LLVM)
+        else()
+            set(LIBCLANG_LIBS_LIST clang LLVM)
         endif()
-        set(LIBCLANG_LIBS "${LIBCLANG_LIBS_LIST}")
-        message(STATUS "Found libclang via ${LIBCLANG_DETECTION_METHOD}")
+
+        set(LIBCLANG_INCLUDES "${LLVM_INCLUDE_DIRS};${CLANG_INCLUDE_DIRS}")
+        set(LIBCLANG_FOUND TRUE)
+        set(LIBCLANG_DETECTION_METHOD "CMake config")
+    elseif(NOT CROSS_COMPILING)
+        # Fallback to llvm-config method (only when not cross-compiling)
+        message(STATUS "LLVM CMake config not found, trying llvm-config")
+
+        # Try to find llvm-config (versions 20 down to 10)
+        set(LLVM_CONFIG_NAMES llvm-config)
+        foreach(ver RANGE 20 10 -1)
+            list(APPEND LLVM_CONFIG_NAMES llvm-config-${ver})
+        endforeach()
+
+        find_program(LLVM_CONFIG NAMES ${LLVM_CONFIG_NAMES})
+
+        if(LLVM_CONFIG)
+            execute_process(COMMAND ${LLVM_CONFIG} --cflags OUTPUT_VARIABLE LIBCLANG_CFLAGS_TEMP OUTPUT_STRIP_TRAILING_WHITESPACE)
+            execute_process(COMMAND ${LLVM_CONFIG} --ldflags OUTPUT_VARIABLE LIBCLANG_LDFLAGS_TEMP OUTPUT_STRIP_TRAILING_WHITESPACE)
+            execute_process(COMMAND ${LLVM_CONFIG} --libs OUTPUT_VARIABLE LLVM_LIBS_TEMP OUTPUT_STRIP_TRAILING_WHITESPACE)
+            execute_process(COMMAND ${LLVM_CONFIG} --system-libs OUTPUT_VARIABLE LLVM_SYSLIBS_TEMP OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+            set(LIBCLANG_CFLAGS_LIST "${LIBCLANG_CFLAGS_TEMP} ${LIBCLANG_LDFLAGS_TEMP}")
+            set(LIBCLANG_LIBS_LIST "-lclang;${LLVM_LIBS_TEMP};${LLVM_SYSLIBS_TEMP}")
+            set(LIBCLANG_CFLAGS "${LIBCLANG_CFLAGS_TEMP}")
+            set(LIBCLANG_LDFLAGS "${LIBCLANG_LDFLAGS_TEMP}")
+            set(LIBCLANG_FOUND TRUE)
+            set(LIBCLANG_DETECTION_METHOD "llvm-config: ${LLVM_CONFIG}")
+        endif()
     else()
-        message(STATUS "libclang not found or not working")
-        message(STATUS "  Reflection support will be disabled")
-        message(STATUS "  To specify libclang location: cmake -DLLVM_ROOT=/path/to/llvm")
-        message(STATUS "  To disable this check: cmake -DENABLE_LIBCLANG=OFF")
+        message(STATUS "Cross-compiling: LLVM CMake config not found")
+        message(STATUS "  Set LLVM_ROOT to LLVM install directory (e.g., /usr/lib/llvm-18)")
+        message(STATUS "  Or set CMAKE_PREFIX_PATH or LLVM_DIR to the directory containing LLVMConfig.cmake")
     endif()
-else()
-    if(NOT LIBCLANG_FOUND)
-        message(STATUS "libclang not found")
-        message(STATUS "  Reflection support will be disabled")
-        message(STATUS "  To specify libclang location: cmake -DLLVM_ROOT=/path/to/llvm")
-        message(STATUS "  To disable this check: cmake -DENABLE_LIBCLANG=OFF")
+
+    # Test if libclang actually works (single test for all detection methods)
+    if(LIBCLANG_FOUND)
+        if(NOT CROSS_COMPILING)
+            check_libclang_works(LIBCLANG_WORKS
+                CFLAGS "${LIBCLANG_CFLAGS_LIST}"
+                INCLUDES "${LIBCLANG_INCLUDES}"
+                LINK_DIRS "${LIBCLANG_LINK_DIRS}"
+                LIBRARIES "${LIBCLANG_LIBS_LIST}"
+            )
+        else()
+            # When cross-compiling, disable libclang by default to avoid linking host libraries
+            # User can set LLVM_ROOT, CMAKE_PREFIX_PATH, or LLVM_DIR to point to target-specific LLVM installation
+            message(STATUS "Cross-compiling: disabling libclang")
+            message(STATUS "  To enable, set LLVM_ROOT or CMAKE_PREFIX_PATH to target LLVM installation")
+            set(LIBCLANG_WORKS FALSE)
+        endif()
+
+        if(LIBCLANG_WORKS)
+            set(HAVE_LIBCLANG 1)
+            # Convert list to string for LIBCLANG_CFLAGS if needed (CMake config path)
+            if(LIBCLANG_DETECTION_METHOD STREQUAL "CMake config")
+                string(REPLACE ";" " " LIBCLANG_CFLAGS "${LIBCLANG_CFLAGS_LIST}")
+            endif()
+            set(LIBCLANG_LIBS "${LIBCLANG_LIBS_LIST}")
+            message(STATUS "Found libclang via ${LIBCLANG_DETECTION_METHOD}")
+        else()
+            message(STATUS "libclang not found or not working")
+            message(STATUS "  Reflection support will be disabled")
+            message(STATUS "  To specify libclang location: cmake -DLLVM_ROOT=/path/to/llvm")
+            message(STATUS "  To disable this check: cmake -DENABLE_LIBCLANG=OFF")
+        endif()
+    else()
+        if(NOT LIBCLANG_FOUND)
+            message(STATUS "libclang not found")
+            message(STATUS "  Reflection support will be disabled")
+            message(STATUS "  To specify libclang location: cmake -DLLVM_ROOT=/path/to/llvm")
+            message(STATUS "  To disable this check: cmake -DENABLE_LIBCLANG=OFF")
+        endif()
     endif()
-endif()
 
 endif() # ENABLE_LIBCLANG
 
@@ -487,6 +518,47 @@ if(NOT MSVC)
     if(COMPILER_SUPPORTS_WNO_TAUTOLOGICAL_CONSTANT_OUT_OF_RANGE_COMPARE)
         list(APPEND COMMON_C_FLAGS -Wno-tautological-constant-out-of-range-compare)
     endif()
+
+    set(USE_STD 0)
+
+    if(NOT USE_STD)
+        check_c_compiler_flag(-std=c2x COMPILER_SUPPORTS_GNU2X)
+        if(COMPILER_SUPPORTS_GNU2X)
+            list(APPEND COMMON_C_FLAGS -std=gnu2x)
+            set(USE_STD 1)
+        endif()
+    endif()
+
+    if(NOT USE_STD)
+        check_c_compiler_flag(-std=c2x COMPILER_SUPPORTS_C2X)
+        if(COMPILER_SUPPORTS_C2X)
+            list(APPEND COMMON_C_FLAGS -std=c2x)
+            set(USE_STD 1)
+        endif()
+    endif()
+
+    # GCC heap trampolines support (for nested functions)
+    # Heap trampolines are more secure than executable stack trampolines
+    # Available in GCC 14+ with -ftrampoline-impl=heap
+    # Supported targets: x86_64/i386/aarch64 Linux, x86_64/i386 Darwin
+    set(HAVE_HEAP_TRAMPOLINES 0)
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        check_c_compiler_flag(-ftrampoline-impl=heap COMPILER_SUPPORTS_HEAP_TRAMPOLINES)
+        if(COMPILER_SUPPORTS_HEAP_TRAMPOLINES)
+            set(HAVE_HEAP_TRAMPOLINES 1)
+            list(APPEND COMMON_C_FLAGS -ftrampoline-impl=heap)
+            message(STATUS "GCC heap trampolines enabled (-ftrampoline-impl=heap)")
+        else()
+            message(STATUS "GCC heap trampolines not available (GCC 14+ required), using stack trampolines")
+        endif()
+    endif()
+
+endif()
+
+# the options for the libs
+set(LIB_OPTS "")
+if(BUILD_SHARED_LIBS)
+    list(APPEND LIB_OPTS "-fPIC")
 endif()
 
 # Network tests
@@ -605,7 +677,7 @@ target_compile_definitions(b3portable PRIVATE
     HASHER_SUFFIX=portable
     SIMD_DEGREE=1
 )
-target_compile_options(b3portable PRIVATE ${COMMON_C_FLAGS})
+target_compile_options(b3portable PRIVATE ${COMMON_C_FLAGS} ${LIB_OPTS})
 
 # BLAKE3 SIMD libraries
 set(BLAKE3_TARGETS b3portable)
@@ -627,7 +699,7 @@ if(TARGET_HAS_SSE2)
         HASHER_SUFFIX=sse2
         SIMD_DEGREE=4
     )
-    target_compile_options(b3sse2 PRIVATE ${COMMON_C_FLAGS} -msse2)
+    target_compile_options(b3sse2 PRIVATE ${COMMON_C_FLAGS} -msse2 ${LIB_OPTS})
     list(APPEND BLAKE3_TARGETS b3sse2)
 endif()
 
@@ -648,7 +720,7 @@ if(TARGET_HAS_SSE41)
         HASHER_SUFFIX=sse41
         SIMD_DEGREE=4
     )
-    target_compile_options(b3sse41 PRIVATE ${COMMON_C_FLAGS} -msse4.1)
+    target_compile_options(b3sse41 PRIVATE ${COMMON_C_FLAGS} -msse4.1 ${LIB_OPTS})
     list(APPEND BLAKE3_TARGETS b3sse41)
 endif()
 
@@ -669,7 +741,7 @@ if(TARGET_HAS_AVX2)
         HASHER_SUFFIX=avx2
         SIMD_DEGREE=8
     )
-    target_compile_options(b3avx2 PRIVATE ${COMMON_C_FLAGS} -mavx2)
+    target_compile_options(b3avx2 PRIVATE ${COMMON_C_FLAGS} -mavx2 ${LIB_OPTS})
     list(APPEND BLAKE3_TARGETS b3avx2)
 endif()
 
@@ -690,7 +762,7 @@ if(TARGET_HAS_AVX512)
         HASHER_SUFFIX=avx512
         SIMD_DEGREE=16
     )
-    target_compile_options(b3avx512 PRIVATE ${COMMON_C_FLAGS} -mavx512f -mavx512vl)
+    target_compile_options(b3avx512 PRIVATE ${COMMON_C_FLAGS} -mavx512f -mavx512vl ${LIB_OPTS})
     list(APPEND BLAKE3_TARGETS b3avx512)
 endif()
 
@@ -710,7 +782,7 @@ if(TARGET_HAS_NEON)
         HASHER_SUFFIX=neon
         SIMD_DEGREE=4
     )
-    target_compile_options(b3neon PRIVATE ${COMMON_C_FLAGS})
+    target_compile_options(b3neon PRIVATE ${COMMON_C_FLAGS} ${LIB_OPTS})
     if(TARGET_CPU_ARM)
         target_compile_options(b3neon PRIVATE -mfpu=neon)
     endif()
@@ -775,6 +847,19 @@ target_link_libraries(fyaml_static
 # Add libclang support if available
 add_libclang_to_target(fyaml_static INTERFACE)
 
+# check if blocks are available, and if so link them
+include(${CMAKE_SOURCE_DIR}/cmake/CheckClangBlocks.cmake)
+
+# Apply flags if available
+if (HAVE_CLANG_BLOCKS)
+    add_compile_options(-fblocks)
+    list(APPEND COMMON_C_FLAGS -fblocks)
+
+    if (CLANG_BLOCKS_LIB)
+        link_libraries(${CLANG_BLOCKS_LIB})
+    endif()
+endif()
+
 target_compile_definitions(fyaml_static PRIVATE
     HAVE_CONFIG_H
     VERSION="${PROJECT_VERSION}"
@@ -828,6 +913,12 @@ add_libclang_to_target(fyaml PRIVATE)
 
 # Generate config.h
 configure_file(
+    ${CMAKE_SOURCE_DIR}/cmake/config.h.in
+    ${CMAKE_BINARY_DIR}/config.h
+)
+
+# Generate config.h
+configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/config.h.in"
     "${CMAKE_CURRENT_BINARY_DIR}/config.h"
 )
@@ -844,11 +935,8 @@ target_compile_options(fyaml PRIVATE ${COMMON_C_FLAGS})
 
 # Shared options between GCC and CLANG
 if(NOT MSVC)
+    target_compile_options(fyaml PRIVATE ${LIB_OPTS})
     target_compile_options(fyaml PRIVATE -fvisibility=hidden)
-
-    if(BUILD_SHARED_LIBS)
-        target_compile_options(fyaml PRIVATE -fPIC)
-    endif()
 
     if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(fyaml PRIVATE -O2)
@@ -1090,6 +1178,7 @@ if(BUILD_TESTING AND NOT CROSS_COMPILING)
 
     # Build libfyaml-test if check is available
     if(HAVE_COMPATIBLE_CHECK)
+
         add_executable(libfyaml-test
             test/libfyaml-test.c
             test/libfyaml-test-core.c
@@ -1098,13 +1187,19 @@ if(BUILD_TESTING AND NOT CROSS_COMPILING)
             test/libfyaml-test-allocator.c
             test/libfyaml-test-private.c
             test/libfyaml-test-private-id.c
+            test/libfyaml-test-parser.c
+            test/libfyaml-test-thread.c
         )
+
+        target_compile_options(libfyaml-test PRIVATE ${COMMON_C_FLAGS})
+        target_compile_definitions(libfyaml-test PRIVATE ${COMMON_C_DEFINITIONS})
 
         target_include_directories(libfyaml-test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/src/valgrind
             ${CMAKE_CURRENT_SOURCE_DIR}/src/lib
             ${CMAKE_CURRENT_SOURCE_DIR}/src/util
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/allocator
             ${CMAKE_CURRENT_BINARY_DIR}
             ${CHECK_INCLUDE_DIRS}
         )
@@ -1131,9 +1226,20 @@ if(BUILD_TESTING AND NOT CROSS_COMPILING)
         else()
             target_link_libraries(libfyaml-test PRIVATE fyaml_static ${CHECK_LIBRARIES})
         endif()
+        if(CHECK_LIBRARY_DIRS)
+            target_link_directories(libfyaml-test PRIVATE ${CHECK_LIBRARY_DIRS})
+        endif()
         if(HAVE_LIBCLANG)
             target_link_directories(libfyaml-test PRIVATE ${LIBCLANG_LINK_DIRS})
         endif()
+
+        if (HAVE_CLANG_BLOCKS)
+            target_compile_options(libfyaml-test PRIVATE -fblocks)
+            if (CLANG_BLOCKS_LIB)
+                target_link_libraries(libfyaml-test PRIVATE ${CLANG_BLOCKS_LIB})
+            endif()
+        endif()
+
         add_dependencies(libfyaml-test fyaml_static)
 
         # Set output directory to match autoconf behavior
@@ -1216,7 +1322,7 @@ if(BUILD_TESTING AND NOT CROSS_COMPILING)
 
     # Build all test dependencies as part of default 'all' target
     # Note: CMake's 'make test' target doesn't trigger builds by design.
-    # Use 'make all test' or 'make check' or 'make build_and_test' for complete workflow.
+    # Use 'make all test' or 'make check-am' or 'make build_and_test' for complete workflow.
     set(TEST_DEPENDENCIES fy-tool fy-thread fy-b3sum fy-allocators)
     if(HAVE_COMPATIBLE_CHECK)
         list(APPEND TEST_DEPENDENCIES libfyaml-test)
@@ -1238,8 +1344,9 @@ if(BUILD_TESTING AND NOT CROSS_COMPILING)
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     )
 
-    # keep the old behavior of check
-    add_custom_target(check
+    # Autotools-compatible test runner using test-driver
+    # NOTE: Named 'check-am' instead of 'check' to avoid conflicts with check library target
+    add_custom_target(check-am
         COMMENT "Running tests via Automake test-driver"
     )
 
@@ -1263,7 +1370,7 @@ if(BUILD_TESTING AND NOT CROSS_COMPILING)
                 COMMENT "Running ${exe}"
             )
             add_dependencies(check_${exe} ${exe})
-            add_dependencies(check check_${exe})
+            add_dependencies(check-am check_${exe})
         endforeach()
     endif()
 
@@ -1301,7 +1408,7 @@ if(BUILD_TESTING AND NOT CROSS_COMPILING)
             COMMENT "Running ${suite}"
         )
         add_dependencies(check_${suite} fy-tool)
-        add_dependencies(check check_${suite})
+        add_dependencies(check-am check_${suite})
     endforeach()
 
 endif()
@@ -1415,6 +1522,9 @@ install(
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
 )
 
+# tags and cscope support
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tags.cmake)
+
 # Print configuration summary
 message(STATUS "")
 message(STATUS "---{ ${PROJECT_NAME} ${PROJECT_VERSION} }---")
@@ -1433,7 +1543,9 @@ message(STATUS "Build type:            ${CMAKE_BUILD_TYPE}")
 message(STATUS "HAVE_CHECK:            ${HAVE_CHECK}")
 message(STATUS "HAVE_COMPATIBLE_CHECK: ${HAVE_COMPATIBLE_CHECK}")
 message(STATUS "HAVE_LIBYAML:          ${HAVE_LIBYAML}")
+message(STATUS "HAVE_CMAKE_GEXPR:      ${HAVE_CMAKE_GEXPR}")
 message(STATUS "HAVE_LIBCLANG:         ${HAVE_LIBCLANG}")
+message(STATUS "HAVE_CLANG_BLOCKS:     ${HAVE_CLANG_BLOCKS}")
 message(STATUS "HAVE_NETWORK:          ${HAVE_NETWORK}")
 message(STATUS "HAVE_DEVMODE:          ${HAVE_DEVMODE}")
 message(STATUS "HAVE_GIT:              ${HAVE_GIT}")
@@ -1446,6 +1558,7 @@ message(STATUS "TARGET_HAS_SSE41:      ${TARGET_HAS_SSE41}")
 message(STATUS "TARGET_HAS_AVX2:       ${TARGET_HAS_AVX2}")
 message(STATUS "TARGET_HAS_AVX512:     ${TARGET_HAS_AVX512}")
 message(STATUS "TARGET_HAS_NEON:       ${TARGET_HAS_NEON}")
+message(STATUS "HAVE_HEAP_TRAMPOLINES: ${HAVE_HEAP_TRAMPOLINES}")
 message(STATUS "TESTSUITEURL:          ${TESTSUITEURL}")
 message(STATUS "TESTSUITECHECKOUT:     ${TESTSUITECHECKOUT}")
 message(STATUS "JSONTESTSUITEURL:      ${JSONTESTSUITEURL}")
@@ -1455,7 +1568,7 @@ if(BUILD_TESTING AND NOT CROSS_COMPILING)
     message(STATUS "Test targets:")
     message(STATUS "  make all test       - Build everything then run CTest (2464 individual tests)")
     message(STATUS "  make build_and_test - Convenience target: build and test in one command")
-    message(STATUS "  make check          - Autotools-compatible TAP test runner (~10 test scripts)")
+    message(STATUS "  make check-am       - Autotools-compatible TAP test runner (~10 test scripts)")
     message(STATUS "")
     message(STATUS "NOTE: 'make test' alone will fail if binaries aren't built. Use 'make all test'.")
     message(STATUS "")

@@ -754,12 +754,19 @@ static const struct fy_reader_ops fy_path_parser_reader_ops = {
 
 void fy_path_parser_setup(struct fy_path_parser *fypp, const struct fy_path_parse_cfg *pcfg)
 {
+	struct fy_diag_cfg dcfg;
+
 	if (!fypp)
 		return;
 
 	memset(fypp, 0, sizeof(*fypp));
 	if (pcfg)
 		fypp->cfg = *pcfg;
+	if (!fypp->cfg.diag) {
+		fy_diag_cfg_default(&dcfg);
+		fypp->cfg.diag = fy_diag_create(&dcfg);
+		fypp->owns_diag = true;
+	}
 	fy_reader_setup(&fypp->reader, &fy_path_parser_reader_ops);
 	fy_token_list_init(&fypp->queued_tokens);
 	fypp->last_queued_token_type = FYTT_NONE;
@@ -774,12 +781,12 @@ void fy_path_parser_setup(struct fy_path_parser *fypp, const struct fy_path_pars
 	fypp->paren_nest_level = 0;
 }
 
-void fy_path_parser_cleanup(struct fy_path_parser *fypp)
+int fy_path_parser_reset(struct fy_path_parser *fypp)
 {
 	struct fy_path_expr *expr;
 
 	if (!fypp)
-		return;
+		return -1;
 
 	fy_expr_stack_cleanup(&fypp->operands);
 	fy_expr_stack_cleanup(&fypp->operators);
@@ -796,6 +803,19 @@ void fy_path_parser_cleanup(struct fy_path_parser *fypp)
 	fypp->stream_error = false;
 	fypp->token_activity_counter = 0;
 	fypp->paren_nest_level = 0;
+
+	return 0;
+}
+
+void fy_path_parser_cleanup(struct fy_path_parser *fypp)
+{
+	if (!fypp)
+		return;
+
+	fy_path_parser_reset(fypp);
+	if (fypp->owns_diag && fypp->cfg.diag)
+		fy_diag_unref(fypp->cfg.diag);
+	memset(fypp, 0, sizeof(*fypp));
 }
 
 int fy_path_parser_open(struct fy_path_parser *fypp,
@@ -1110,7 +1130,7 @@ err_out:
 int fy_path_fetch_tokens(struct fy_path_parser *fypp)
 {
 	enum fy_token_type type;
-	struct fy_token *fyt;
+	struct fy_token *fyt = NULL;
 	struct fy_reader *fyr;
 	int c, cn, rc, simple_token_count;
 
@@ -1119,6 +1139,7 @@ int fy_path_fetch_tokens(struct fy_path_parser *fypp)
 
 		fyt = fy_path_token_queue(fypp, FYTT_STREAM_START, fy_reader_fill_atom_a(fyr, 0));
 		fyr_error_check(fyr, fyt, err_out, "fy_path_token_queue() failed\n");
+		fyt = NULL;
 
 		fypp->stream_start_produced = true;
 		return 0;
@@ -1136,6 +1157,7 @@ int fy_path_fetch_tokens(struct fy_path_parser *fypp)
 		/* produce stream end continuously */
 		fyt = fy_path_token_queue(fypp, FYTT_STREAM_END, fy_reader_fill_atom_a(fyr, 0));
 		fyr_error_check(fyr, fyt, err_out, "fy_path_token_queue() failed\n");
+		fyt = NULL;
 
 		return 0;
 	}
@@ -1381,6 +1403,7 @@ do_token:
 	if (simple_token_count > 0) {
 		fyt = fy_path_token_queue(fypp, type, fy_reader_fill_atom_a(fyr, simple_token_count));
 		fyr_error_check(fyr, fyt, err_out, "fy_path_token_queue() failed\n");
+		fyt = NULL;
 
 		return 0;
 	}
@@ -3205,7 +3228,7 @@ fy_path_parse_expression(struct fy_path_parser *fypp)
 	struct fy_reader *fyr;
 	struct fy_token *fyt = NULL;
 	enum fy_token_type fytt;
-	struct fy_path_expr *expr, *expr_top, *exprt;
+	struct fy_path_expr *expr = NULL, *expr_top, *exprt;
 	enum fy_expr_mode old_scan_mode, prev_scan_mode;
 	int ret, rc;
 
@@ -3509,6 +3532,8 @@ fy_path_parse_expression(struct fy_path_parser *fypp)
 	return expr;
 
 err_out:
+	if (expr)
+		fy_path_expr_free(expr);
 #ifdef DEBUG_EXPR
 	fy_notice(fypp->cfg.diag, "operator stack (error)\n");
 	fy_expr_stack_dump(fypp->cfg.diag, &fypp->operators);
@@ -3684,14 +3709,6 @@ void fy_path_parser_destroy(struct fy_path_parser *fypp)
 		return;
 	fy_path_parser_cleanup(fypp);
 	free(fypp);
-}
-
-int fy_path_parser_reset(struct fy_path_parser *fypp)
-{
-	if (!fypp)
-		return -1;
-	fy_path_parser_cleanup(fypp);
-	return 0;
 }
 
 struct fy_path_expr *
@@ -4441,7 +4458,11 @@ fy_walk_result_perform_set_op(struct fy_path_exec *fypx, struct fy_walk_result *
 
 	if (!set) {
 		/* on unselect, return input, on select return NULL */
-		return op == FYWRSO_UNSELECT ? input : NULL;
+		if (op == FYWRSO_UNSELECT)
+			return input;
+
+		fy_walk_result_free(input);
+		return NULL;
 	}
 
 	assert(input->type == fwrt_node_ref || input->type == fwrt_refs);
@@ -4520,7 +4541,11 @@ fy_walk_result_perform_set_op(struct fy_path_exec *fypx, struct fy_walk_result *
 
 	if (!output) {
 		/* nothing? nothing was removed or nothing was selected */
-		return op == FYWRSO_UNSELECT ? input : NULL;
+		if (op == FYWRSO_UNSELECT)
+			return input;
+
+		fy_walk_result_free(input);
+		return NULL;
 	}
 
 	/* simplify (might remove everything if empty) */
@@ -5270,6 +5295,7 @@ int fy_node_setup_path_expr_data(struct fy_node *fyn)
 		pxnd->fyi = fy_input_from_malloc_data(alloc, len + 1, NULL, false);
 		if (!pxnd->fyi)
 			goto err_no_input;
+		alloc = NULL;
 	}
 
 	fy_path_parser_reset(pxdd->fypp);

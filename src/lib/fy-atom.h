@@ -71,6 +71,7 @@ struct fy_atom {
 			unsigned int tabsize : 8;
 			unsigned int lb_mode : 1; /* enum fy_lb_mode */
 			unsigned int fws_mode : 1; /* enum fy_flow_ws_mode */
+			unsigned int directive0_mode : 1;
 			bool direct_output : 1;		/* can directly output */
 			bool storage_hint_valid : 1;
 			bool empty : 1;			/* atom contains whitespace and linebreaks only if length > 0 */
@@ -87,6 +88,7 @@ struct fy_atom {
 			bool ends_with_eof : 1;		/* atom ends at EOF of input */
 			bool is_merge_key: 1;		/* atom is just << */
 			bool simple_key_allowed : 1;	/* atom allows a simple key */
+			bool high_ascii : 1;		/* atom has utf code point >= 0x80 (only for plains) */
 		};
 	};
 };

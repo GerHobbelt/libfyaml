@@ -681,6 +681,28 @@ fy_token_text_analyze(struct fy_token *fyt)
 
 	style = fy_token_atom_style(fyt);
 
+	/* hardwired and fast for regular plain scalars */
+	if (style == FYAS_PLAIN && fyt->handle.storage_hint_valid &&
+	    fyt->handle.direct_output && !fyt->handle.high_ascii &&
+	    !fyt->handle.has_lb && !fyt->handle.has_ws && !fyt->handle.empty) {
+
+		flags |= FYTTAF_DIRECT_OUTPUT;
+
+		maxcol = fyt->handle.storage_hint;
+		maxspan = maxcol - 1;
+		flags |=
+			FYTTAF_DIRECT_OUTPUT |
+			FYTTAF_CAN_BE_SIMPLE_KEY |
+			FYTTAF_CAN_BE_PLAIN |
+			FYTTAF_CAN_BE_SINGLE_QUOTED |
+			FYTTAF_CAN_BE_DOUBLE_QUOTED |
+			FYTTAF_CAN_BE_LITERAL |
+			FYTTAF_CAN_BE_PLAIN_FLOW |
+			FYTTAF_CAN_BE_UNQUOTED_PATH_KEY;
+
+		goto done;
+	}
+
 	/* can this token be a simple key initial condition */
 	if (!fy_atom_style_is_block(style) && style != FYAS_URI)
 		flags |= FYTTAF_CAN_BE_SIMPLE_KEY;
@@ -839,10 +861,13 @@ fy_token_text_analyze(struct fy_token *fyt)
 
 		/* last character */
 		if (cn < 0) {
-			/* if ends with whitespace or linebreak, can't be plain */
-			if (fy_is_ws(c) || fy_token_is_lb(fyt, c))
+			/* if ends with whitespace or linebreak, or : can't be plain */
+			if (fy_is_ws(c) || fy_token_is_lb(fyt, c) || c == ':') {
 				flags &= ~(FYTTAF_CAN_BE_PLAIN |
 					   FYTTAF_CAN_BE_PLAIN_FLOW);
+				if (c == ':')
+					flags |= FYTTAF_ENDS_WITH_COLON;
+			}
 		}
 	}
 
@@ -853,6 +878,7 @@ fy_token_text_analyze(struct fy_token *fyt)
 out:
 	fy_atom_iter_finish(&iter);
 
+done:
 	fyt->analysis.flags = flags | FYTTAF_ANALYZED;
 	fyt->analysis.maxspan = maxspan;
 	fyt->analysis.maxcol = maxcol;
@@ -887,6 +913,23 @@ const char *fy_token_get_direct_output(struct fy_token *fyt, size_t *sizep)
 	}
 	*sizep = fy_atom_size(fya);
 	return fy_atom_data(fya);
+}
+
+const char *fy_token_get_direct_simple_output(struct fy_token *fyt, size_t *sizep)
+{
+	const struct fy_atom *handle;
+
+	handle = fy_token_atom(fyt);
+
+	if (!(handle->style == FYAS_PLAIN && handle->storage_hint_valid &&
+	      handle->direct_output && !handle->high_ascii &&
+	      !handle->has_lb && !handle->has_ws && !handle->empty)) {
+		*sizep = 0;
+		return NULL;
+	}
+
+	*sizep = fy_atom_size(handle);
+	return fy_atom_data(handle);
 }
 
 const char *fy_tag_token_handle(struct fy_token *fyt, size_t *lenp)
@@ -1444,6 +1487,12 @@ unsigned int fy_analyze_scalar_content(const char *data, size_t size,
 
 	s = data;
 	e = data + size;
+
+	/* if it ends in : can't be a plain */
+	if (e > s && e[-1] == ':') {
+		flags &= ~(FYACF_BLOCK_PLAIN | FYACF_FLOW_PLAIN);
+		flags |= FYACF_ENDS_WITH_COLON;
+	}
 
 	col = 0;
 	first = true;

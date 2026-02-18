@@ -50,7 +50,8 @@ libfyaml_la_SOURCES += \
 	util/fy-id.h \
 	util/fy-align.h \
 	util/fy-bit64.h \
-	util/fy-vlsize.h
+	util/fy-vlsize.h \
+	util/fy-atomics.h
 
 # xxhash
 libfyaml_la_SOURCES += \
@@ -145,6 +146,13 @@ libfyaml_la_CFLAGS += $(LIBCLANG_CFLAGS)
 libfyaml_la_LDFLAGS += $(LIBCLANG_LDFLAGS) $(LIBCLANG_LIBS)
 endif
 
+if HAVE_CLANG_BLOCKS
+libfyaml_la_CFLAGS += $(CLANG_BLOCKS_CFLAGS)
+libfyaml_la_LDFLAGS += $(CLANG_BLOCKS_LIBS)
+endif
+
+if HAVE_STATIC
+
 if HAVE_LIBYAML
 if !CROSS_COMPILING
 
@@ -206,6 +214,8 @@ fy_allocators_CFLAGS = $(AM_CFLAGS) $(LIBYAML_CFLAGS)
 
 fy_allocators_LDFLAGS = $(AM_LDFLAGS) -static
 endif
+
+endif # HAVE_STATIC
 
 bin_PROGRAMS += fy-tool
 

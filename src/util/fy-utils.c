@@ -26,6 +26,8 @@
 #include "fy-ctype.h"
 #include "fy-utils.h"
 
+#include "xxhash.h"
+
 #if defined(__APPLE__) && (_POSIX_C_SOURCE < 200809L)
 
 /*
@@ -673,7 +675,7 @@ again:
 	e = iter->end;
 
 	/* skip whitespace */
-	while (s < e && isblank(*s))
+	while (s < e && isblank((unsigned char)*s))
 		s++;
 
 	if (s >= e)
@@ -693,12 +695,12 @@ again:
 		le -= 2;
 
 	/* backtrack while there's space at the end of line */
-	while (le > s && isblank(le[-1]))
+	while (le > s && isblank((unsigned char)le[-1]))
 		le--;
 
 	/* check if the whole line is punctuation so it's formatting */
 	t = s;
-	while (t < le && ispunct(*t))
+	while (t < le && ispunct((unsigned char)*t))
 		t++;
 
 	/* everything is punctuation? */
@@ -713,11 +715,11 @@ again:
 	}
 
 	/* something is there, skip over '// ' or '* ' */
-	if ((le - s) > 3 && s[0] == '/' && s[1] == '/' && isblank(s[2]))
+	if ((le - s) > 3 && s[0] == '/' && s[1] == '/' && isblank((unsigned char)s[2]))
 		s += 3;
-	else if ((le - s) > 2 && s[0] == '*' && isblank(s[1]))
+	else if ((le - s) > 2 && s[0] == '*' && isblank((unsigned char)s[1]))
 		s += 2;
-	else if (iter->line == 0 && (le - s) > 3 && s[0] == '/' && s[1] == '*' && isblank(s[2]))
+	else if (iter->line == 0 && (le - s) > 3 && s[0] == '/' && s[1] == '*' && isblank((unsigned char)s[2]))
 		s += 3;
 
 	iter->line++;
@@ -877,4 +879,22 @@ void fy_keyword_iter_advance(struct fy_keyword_iter *iter, size_t advance)
 void fy_keyword_iter_end(struct fy_keyword_iter *iter)
 {
 	/* nothing */
+}
+
+#define FY_XXHASH64_SEED	((uint64_t)0x1973198120142019U)
+
+uint64_t fy_iovec_xxhash64(const struct iovec *iov, int iovcnt)
+{
+	XXH64_state_t xxstate;
+	uint64_t hash;
+	int i;
+
+	XXH64_reset(&xxstate, FY_XXHASH64_SEED);
+	for (i = 0; i < iovcnt; i++)
+		XXH64_update(&xxstate, iov[i].iov_base, iov[i].iov_len);
+	hash = XXH64_digest(&xxstate);
+	/* XXX we never return a hash value of zero */
+	if (!hash)
+		hash++;
+	return hash;
 }

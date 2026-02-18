@@ -125,14 +125,15 @@ AC_TYPE_OFF_T
 AC_TYPE_UID_T
 AC_CHECK_DECLS(environ)
 
-AC_CHECK_HEADERS([byteswap.h])
+AC_CHECK_HEADERS([alloca.h byteswap.h])
 AC_CHECK_FUNCS([__builtin_bswap16 __builtin_bswap32 __builtin_bswap64])
 
 dnl for old autoconf version AX_APPEND_COMPILE_FLAGS does not work
 m4_version_prereq(2.64,
 	 [AX_APPEND_COMPILE_FLAGS([-Wall -Wsign-compare -Wno-stringop-overflow \
 				   -fvisibility=hidden -Wno-unused-function \
-				   -Wno-tautological-constant-out-of-range-compare],
+				   -Wno-tautological-constant-out-of-range-compare \
+				   -std=c2x],
 				  [CFLAGS], [-pedantic -Werror])],
          [CFLAGS="$CFLAGS -Wall -Wsign-compare"])
 
@@ -168,12 +169,12 @@ AC_ARG_ENABLE([portable-target],
 	      AS_HELP_STRING([--enable-portable-target],
 			     [Enable portable mode (disable per-target optimizations)]))
 HAVE_PORTABLE_TARGET=0
-if test "x$enable_portable_target" == "xyes"; then
+if test "x$enable_portable_target" = "xyes"; then
 	HAVE_PORTABLE_TARGET=1
 fi
 AC_SUBST(HAVE_PORTABLE_TARGET)
 AC_DEFINE_UNQUOTED([HAVE_PORTABLE_TARGET], [$HAVE_PORTABLE_TARGET], [Define to 1 if PORTABLE_TARGET is enabled])
-AM_CONDITIONAL([HAVE_PORTABLE_TARGET], [ test x$HAVE_PORTABLE_TARGET == x1 ])
+AM_CONDITIONAL([HAVE_PORTABLE_TARGET], [ test x$HAVE_PORTABLE_TARGET = x1 ])
 
 dnl Detect cross-compilation
 if test "x$build" != "x$host" ; then
@@ -227,7 +228,7 @@ AC_ARG_ENABLE([asan],
 HAVE_ASAN=0
 ASAN_CFLAGS=""
 ASAN_LIBS=""
-if test "x$enable_asan" == "xyes" ; then
+if test "x$enable_asan" = "xyes" ; then
 	AC_MSG_CHECKING([location of ASAN library])
 	ASANLIB1=`${CC} -print-file-name=libasan.so`
 	ASANLIB=`readlink -f "${ASANLIB1}"`
@@ -473,12 +474,12 @@ if test "x$with_libclang" != "xno"; then
 	fi
 fi
 if test "x$with_libclang" != "xno"; then
-	if test "x$with_libclang" == "xauto"; then
+	if test "x$with_libclang" = "xauto"; then
 		# try to auto detect (llvm 20 down to 10)
 		check="llvm-config llvm-config-20 llvm-config-19 llvm-config-18 llvm-config-17 llvm-config-16 \
 			llvm-config-15 llvm-config-14 llvm-config-13 llvm-config-12 llvm-config-11 llvm-config-10"
 	else
-		if test "x$with_libclang" == "xlatest"; then
+		if test "x$with_libclang" = "xlatest"; then
 			check="llvm-config"
 		else
 			check="llvm-config-$with_libclang"
@@ -546,6 +547,106 @@ AC_SUBST(LIBCLANG_LIBS)
 AC_DEFINE_UNQUOTED([HAVE_LIBCLANG], [$HAVE_LIBCLANG], [Define to 1 if libclang is available])
 AM_CONDITIONAL([HAVE_LIBCLANG], [ test x$HAVE_LIBCLANG = x1 ])
 
+dnl Check for Clang Blocks support (Clang or AppleClang)
+dnl Blocks provide closure support for C, useful for callback-heavy APIs
+HAVE_CLANG_BLOCKS=0
+CLANG_BLOCKS_CFLAGS=""
+CLANG_BLOCKS_LIBS=""
+
+AC_MSG_CHECKING([for Clang compiler])
+case "$CC" in
+	*clang*)
+		IS_CLANG=yes
+		;;
+	*)
+		IS_CLANG=no
+		;;
+esac
+AC_MSG_RESULT([$IS_CLANG])
+
+if test "x$IS_CLANG" = "xyes"; then
+	dnl Check if this is AppleClang (Blocks built-in) or LLVM Clang (needs BlocksRuntime)
+	AC_MSG_CHECKING([for AppleClang])
+	if $CC --version 2>&1 | grep -q "Apple" ; then
+		IS_APPLECLANG=yes
+	else
+		IS_APPLECLANG=no
+	fi
+	AC_MSG_RESULT([$IS_APPLECLANG])
+
+	if test "x$IS_APPLECLANG" = "xyes"; then
+		dnl AppleClang has Blocks built-in
+		AC_MSG_CHECKING([for AppleClang Blocks support])
+		save_CFLAGS="$CFLAGS"
+		CFLAGS="$CFLAGS -fblocks"
+		AC_COMPILE_IFELSE(
+			[AC_LANG_PROGRAM([[]], [[
+				void (^b)(void) = ^{ };
+				b();
+			]])],
+			[HAVE_CLANG_BLOCKS=1
+			 CLANG_BLOCKS_CFLAGS="-fblocks"
+			 AC_MSG_RESULT([yes])],
+			[AC_MSG_RESULT([no])])
+		CFLAGS="$save_CFLAGS"
+	else
+		dnl LLVM Clang needs libBlocksRuntime
+		AC_MSG_CHECKING([for Clang Blocks with libBlocksRuntime])
+		save_CFLAGS="$CFLAGS"
+		save_LIBS="$LIBS"
+		CFLAGS="$CFLAGS -fblocks"
+		LIBS="$LIBS -lBlocksRuntime"
+		AC_LINK_IFELSE(
+			[AC_LANG_PROGRAM([[#include <Block.h>]], [[
+				void (^b)(void) = ^{ };
+				b();
+			]])],
+			[HAVE_CLANG_BLOCKS=1
+			 CLANG_BLOCKS_CFLAGS="-fblocks"
+			 CLANG_BLOCKS_LIBS="-lBlocksRuntime"
+			 AC_MSG_RESULT([yes])],
+			[AC_MSG_RESULT([no - libBlocksRuntime not found])])
+		CFLAGS="$save_CFLAGS"
+		LIBS="$save_LIBS"
+	fi
+fi
+
+AC_SUBST(HAVE_CLANG_BLOCKS)
+AC_SUBST(CLANG_BLOCKS_CFLAGS)
+AC_SUBST(CLANG_BLOCKS_LIBS)
+AC_DEFINE_UNQUOTED([HAVE_CLANG_BLOCKS], [$HAVE_CLANG_BLOCKS], [Define to 1 if Clang Blocks are available])
+AM_CONDITIONAL([HAVE_CLANG_BLOCKS], [ test x$HAVE_CLANG_BLOCKS = x1 ])
+
+dnl GCC heap trampolines support (for nested functions)
+dnl Heap trampolines are more secure than executable stack trampolines
+dnl Available in GCC 14+ with -ftrampoline-impl=heap
+dnl Supported targets: x86_64/i386/aarch64 Linux, x86_64/i386 Darwin
+HAVE_HEAP_TRAMPOLINES=0
+
+AC_MSG_CHECKING([for GCC compiler])
+case "$CC" in
+	*gcc*)
+		IS_GCC=yes
+		;;
+	*)
+		IS_GCC=no
+		;;
+esac
+AC_MSG_RESULT([$IS_GCC])
+
+if test "x$IS_GCC" = "xyes"; then
+	AX_CHECK_COMPILE_FLAG([-ftrampoline-impl=heap],
+		[HAVE_HEAP_TRAMPOLINES=1
+		 CFLAGS="$CFLAGS -ftrampoline-impl=heap"
+		 AC_MSG_NOTICE([GCC heap trampolines enabled (-ftrampoline-impl=heap)])],
+		[AC_MSG_NOTICE([GCC heap trampolines not available (GCC 14+ required), using stack trampolines])],
+		[-Werror])
+fi
+
+AC_SUBST(HAVE_HEAP_TRAMPOLINES)
+AC_DEFINE_UNQUOTED([HAVE_HEAP_TRAMPOLINES], [$HAVE_HEAP_TRAMPOLINES], [Define to 1 if GCC heap trampolines are enabled])
+AM_CONDITIONAL([HAVE_HEAP_TRAMPOLINES], [ test x$HAVE_HEAP_TRAMPOLINES = x1 ])
+
 dnl trim cflags, cppflags, ldflags
 CFLAGS=`echo $CFLAGS | sed -e 's/^[ ]*//'`
 CPPFLAGS=`echo $CPPFLAGS | sed -e 's/^[ ]*//'`
@@ -597,6 +698,8 @@ echo "
     DOCKER:                ${DOCKER}
     HAVE_LIBCLANG:         ${HAVE_LIBCLANG}
     LIBCLANG_LIBS:         ${LIBCLANG_LIBS}
+    HAVE_CLANG_BLOCKS:     ${HAVE_CLANG_BLOCKS}
+    HAVE_HEAP_TRAMPOLINES: ${HAVE_HEAP_TRAMPOLINES}
     TESTSUITEURL:          $TESTSUITEURL
     TESTSUITECHECKOUT:     $TESTSUITECHECKOUT
     JSONTESTSUITEURL:      $JSONTESTSUITEURL

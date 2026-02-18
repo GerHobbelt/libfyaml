@@ -20,7 +20,11 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+
+#ifdef HAVE_ALLOCA_H
 #include <alloca.h>
+#endif
+
 #include <stdbool.h>
 #include <getopt.h>
 #include <ctype.h>
@@ -33,18 +37,19 @@
 
 #include <libfyaml.h>
 
+#include "fy-atomics.h"
 #include "fy-thread.h"
 
 static void test_worker_thread_fn(void *arg)
 {
-	_Atomic(int) *p = arg;
+	FY_ATOMIC(int) *p = arg;
 	int v, exp_v;
 
 	/* atomically increase the counter */
-	v = atomic_load(p);
+	v = fy_atomic_load(p);
 	for (;;) {
 		exp_v = v;
-		if (atomic_compare_exchange_strong(p, &exp_v, v + 1))
+		if (fy_atomic_compare_exchange_strong(p, &exp_v, v + 1))
 			return;
 		v = exp_v;
 	}
@@ -290,16 +295,16 @@ void test_thread_latency(unsigned int num_threads)
 #define STEAL_LOOP_COUNT 10000
 static void test_worker_thread_steal_fn(void *arg)
 {
-	_Atomic(int) *p = arg;
+	FY_ATOMIC(int) *p = arg;
 	int v, exp_v;
 	unsigned int i;
 
 	/* atomically increase the counter STEAL_LOOP_COUNT times */
 	for (i = 0; i < STEAL_LOOP_COUNT; i++) {
-		v = atomic_load(p);
+		v = fy_atomic_load(p);
 		for (;;) {
 			exp_v = v;
-			if (atomic_compare_exchange_strong(p, &exp_v, v + 1))
+			if (fy_atomic_compare_exchange_strong(p, &exp_v, v + 1))
 				break;
 			v = exp_v;
 		}
@@ -549,7 +554,7 @@ int main(int argc, char *argv[])
 	unsigned int num_threads = 0;
 	int exitcode = EXIT_FAILURE, opti;
 
-	while ((opt = getopt_long_only(argc, argv, "h", lopts, &lidx)) != -1) {
+	while ((opt = getopt_long(argc, argv, "h", lopts, &lidx)) != -1) {
 		switch (opt) {
 		case OPT_NUM_THREADS:
 			opti = atoi(optarg);
