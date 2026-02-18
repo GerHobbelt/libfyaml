@@ -1,3 +1,4 @@
+# vim: set ts=4:sw=4:expandtab:
 cmake_minimum_required(VERSION 3.14)
 
 if (POLICY CMP0048)
@@ -211,11 +212,16 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
     if(check_FOUND)
         set(HAVE_CHECK 1)
         set(CHECK_LIBRARIES check)
-        get_target_property(CHECK_INCLUDE_DIRS check INTERFACE_INCLUDE_DIRECTORIES)
+        if(TARGET Check::check)
+            set(CHECK_TARGET Check::check)
+        else()
+            set(CHECK_TARGET check)
+        endif()
+		get_target_property(CHECK_INCLUDE_DIRS ${CHECK_TARGET} INTERFACE_INCLUDE_DIRECTORIES)
         # Get library location to extract directory
-        get_target_property(CHECK_LIB_LOCATION check IMPORTED_LOCATION)
+        get_target_property(CHECK_LIB_LOCATION ${CHECK_TARGET} IMPORTED_LOCATION)
         if(NOT CHECK_LIB_LOCATION)
-            get_target_property(CHECK_LIB_LOCATION check LOCATION)
+            get_target_property(CHECK_LIB_LOCATION ${CHECK_TARGET} LOCATION)
         endif()
         if(CHECK_LIB_LOCATION)
             get_filename_component(CHECK_LIBRARY_DIRS "${CHECK_LIB_LOCATION}" DIRECTORY)
@@ -565,11 +571,8 @@ if(ENABLE_ASAN)
 endif()
 
 set(ASAN_C_FLAGS)
-if(HAS_ASAN)
-  set(ASAN_C_FLAGS "-fsanitize=address -fno-omit-frame-pointer")
-  if(APPLE)
-    list(APPEND ASAN_C_FLAGS "-mllvm" "-asan-stack-dynamic-allocs=0")
-  endif()
+if(HAVE_ASAN)
+  set(ASAN_C_FLAGS "-fsanitize=address" "-fno-omit-frame-pointer")
 endif()
 
 # Build common compiler flags for all targets
@@ -935,7 +938,7 @@ endforeach()
 
 set_target_properties(fyaml_static PROPERTIES
     OUTPUT_NAME fyaml_static
-    POSITION_INDEPENDENT_CODE OFF
+    POSITION_INDEPENDENT_CODE ON
     FOLDER "Libraries"
 )
 
@@ -1061,7 +1064,7 @@ if(NOT MSVC AND NOT WIN32)
     if(HAVE_ASAN)
         target_compile_options(fyaml PRIVATE ${ASAN_C_FLAGS} -fno-omit-frame-pointer)
         # Use INTERFACE to propagate link flags to executables linking against this library
-        target_link_options(fyaml INTERFACE ${ASAN_C_FLAGS})
+		target_link_options(fyaml PRIVATE ${ASAN_C_FLAGS} INTERFACE ${ASAN_C_FLAGS})
     endif()
 endif()
 
@@ -1292,6 +1295,7 @@ if(CAN_TEST)
 
         target_include_directories(libfyaml-test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/check
             ${CMAKE_CURRENT_SOURCE_DIR}/src/valgrind
             ${CMAKE_CURRENT_SOURCE_DIR}/src/lib
             ${CMAKE_CURRENT_SOURCE_DIR}/src/util
@@ -1344,11 +1348,7 @@ if(CAN_TEST)
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test
         )
 
-        # Add the libfyaml-test binary as the libfyaml test
-        add_test(NAME libfyaml
-            COMMAND $<TARGET_FILE:libfyaml-test>
-            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test
-        )
+	add_libfyaml_tests()
     endif()
 
     # Error tests - register individual subtests

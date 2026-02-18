@@ -35,6 +35,30 @@ enum fy_scalar_style fy_token_scalar_style(struct fy_token *fyt)
 	return fy_token_scalar_style_inline(fyt);
 }
 
+enum fy_collection_style fy_token_collection_style(struct fy_token *fyt)
+{
+	if (!fyt)
+		return FYCS_ANY;
+
+	switch (fyt->type) {
+	case FYTT_FLOW_SEQUENCE_START:
+	case FYTT_FLOW_SEQUENCE_END:
+	case FYTT_FLOW_MAPPING_START:
+	case FYTT_FLOW_MAPPING_END:
+		return FYCS_FLOW;
+
+	case FYTT_BLOCK_SEQUENCE_START:
+	case FYTT_BLOCK_MAPPING_START:
+	case FYTT_BLOCK_END:
+		return FYCS_BLOCK;
+
+	default:
+		break;
+	}
+
+	return FYCS_ANY;
+}
+
 enum fy_token_type fy_token_get_type(struct fy_token *fyt)
 {
 	return fy_token_get_type_inline(fyt);
@@ -401,6 +425,7 @@ struct fy_token *fy_token_vcreate_rl(struct fy_token_list *fytl, enum fy_token_t
 	if (!fyt)
 		goto err_out;
 	fyt->type = type;
+	fyt->handle.fyi = NULL;
 
 	handle = va_arg(ap, struct fy_atom *);
 	if (handle)
@@ -417,13 +442,16 @@ struct fy_token *fy_token_vcreate_rl(struct fy_token_list *fytl, enum fy_token_t
 		fyt->tag_directive.handle0 = NULL;
 		break;
 	case FYTT_SCALAR:
-		fyt->scalar.style = va_arg(ap, enum fy_scalar_style);
-		if (fyt->scalar.style != FYSS_ANY && (unsigned int)fyt->scalar.style >= FYSS_MAX)
-			goto err_out;
 		fyt->scalar.path_key = NULL;
 		fyt->scalar.path_key_len = 0;
 		fyt->scalar.path_key_storage = NULL;
 		fyt->scalar.is_null = false;	/* by default the scalar is not NULL */
+		fyt->scalar.style = va_arg(ap, enum fy_scalar_style);
+		/* by default it's the same as the content */
+		fyt->scalar.style_start = handle->start_mark;
+		fyt->scalar.style_end = handle->end_mark;
+		if (fyt->scalar.style != FYSS_ANY && (unsigned int)fyt->scalar.style >= FYSS_MAX)
+			goto err_out;
 		break;
 	case FYTT_TAG:
 		fyt->tag.skip = va_arg(ap, unsigned int);
@@ -445,6 +473,7 @@ struct fy_token *fy_token_vcreate_rl(struct fy_token_list *fytl, enum fy_token_t
 
 	case FYTT_ALIAS:
 		fyt->alias.expr = va_arg(ap, struct fy_path_expr *);
+		fyt->alias.style_start = fyt->handle.start_mark;
 		break;
 
 	case FYTT_KEY:
@@ -466,6 +495,10 @@ struct fy_token *fy_token_vcreate_rl(struct fy_token_list *fytl, enum fy_token_t
 
 	case FYTT_NONE:
 		goto err_out;
+
+	case FYTT_ANCHOR:
+		fyt->anchor.style_start = fyt->handle.start_mark;
+		break;
 
 	default:
 		break;
@@ -642,12 +675,6 @@ fy_token_text_analyze(struct fy_token *fyt)
 		.maxspan = 0,
 		.maxcol = 0,
 	};
-	struct fy_atom_iter iter;
-	enum fy_atom_style style;
-	int c, cn, cnn, cp, col;
-	uint8_t col0si, col0ei;	/* mask for --- ... at indent 0 */
-	int flags, span, maxspan, maxcol;
-
 	if (!fyt)
 		return &null_analysis;
 
@@ -655,224 +682,17 @@ fy_token_text_analyze(struct fy_token *fyt)
 		return &fyt->analysis;
 
 	/* only tokens that can generate text */
-	if (fyt->type != FYTT_SCALAR &&
-	    fyt->type != FYTT_TAG &&
-	    fyt->type != FYTT_ANCHOR &&
-	    fyt->type != FYTT_ALIAS) {
-		flags = FYTTAF_NO_TEXT_TOKEN;
-
-		fyt->analysis.flags = flags | FYTTAF_ANALYZED;
+	if (fyt->type == FYTT_SCALAR || fyt->type == FYTT_TAG ||
+	    fyt->type == FYTT_ANCHOR || fyt->type == FYTT_ALIAS) {
+		fyt->analysis.flags = fy_atom_text_analyze(fy_token_atom(fyt), fy_token_atom_style(fyt),
+				&fyt->analysis.maxspan, &fyt->analysis.maxcol);
+	} else {
+		fyt->analysis.flags = FYTTAF_NO_TEXT_TOKEN;
 		fyt->analysis.maxspan = 0;
 		fyt->analysis.maxcol = 0;
-
-		return &fyt->analysis;
 	}
 
-	flags = FYTTAF_TEXT_TOKEN;
-
-	style = fy_token_atom_style(fyt);
-
-	/* hardwired and fast for regular plain scalars */
-	if (style == FYAS_PLAIN && fyt->handle.storage_hint_valid &&
-	    fyt->handle.direct_output && !fyt->handle.high_ascii &&
-	    !fyt->handle.has_lb && !fyt->handle.has_ws && !fyt->handle.empty) {
-
-		flags |= FYTTAF_DIRECT_OUTPUT;
-
-		maxcol = (int)fyt->handle.storage_hint;
-		maxspan = maxcol - 1;
-		flags |=
-			FYTTAF_DIRECT_OUTPUT |
-			FYTTAF_CAN_BE_SIMPLE_KEY |
-			FYTTAF_CAN_BE_PLAIN |
-			FYTTAF_CAN_BE_SINGLE_QUOTED |
-			FYTTAF_CAN_BE_DOUBLE_QUOTED |
-			FYTTAF_CAN_BE_LITERAL |
-			FYTTAF_CAN_BE_PLAIN_FLOW |
-			FYTTAF_CAN_BE_UNQUOTED_PATH_KEY;
-
-		goto done;
-	}
-
-	/* can this token be a simple key initial condition */
-	if (!fy_atom_style_is_block(style) && style != FYAS_URI)
-		flags |= FYTTAF_CAN_BE_SIMPLE_KEY;
-
-	/* can this token be directly output initial condition */
-	if (!fy_atom_style_is_block(style))
-		flags |= FYTTAF_DIRECT_OUTPUT;
-
-	fy_atom_iter_start(&fyt->handle, &iter);
-
-	col = 0;
-	maxcol = 0;
-	maxspan = 0;
-	span = 0;
-
-	/* get first character */
-	cn = fy_atom_iter_utf8_get(&iter);
-	if (cn < 0) {
-		/* empty? */
-		flags |= FYTTAF_EMPTY | FYTTAF_CAN_BE_DOUBLE_QUOTED | FYTTAF_CAN_BE_UNQUOTED_PATH_KEY | FYTTAF_CAN_BE_SIMPLE_KEY;
-		goto out;
-	}
-
-	flags |= FYTTAF_CAN_BE_PLAIN |
-		 FYTTAF_CAN_BE_SINGLE_QUOTED |
-		 FYTTAF_CAN_BE_DOUBLE_QUOTED |
-		 FYTTAF_CAN_BE_LITERAL |
-		 FYTTAF_CAN_BE_FOLDED |
-		 FYTTAF_CAN_BE_PLAIN_FLOW |
-		 FYTTAF_CAN_BE_UNQUOTED_PATH_KEY;
-
-	col0si = col0ei = 0;
-
-	/* disable folded right off the bat, it's a pain */
-	flags &= ~FYTTAF_CAN_BE_FOLDED;
-
-	/* plain scalars can't start with any indicator (or space/lb) */
-	if ((flags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW))) {
-		if (fy_is_start_indicator(cn) || fy_token_is_lb(fyt, cn) || fy_is_ws(cn))
-			flags &= ~(FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW);
-	}
-
-	/* plain scalars in flow mode can't start with a flow indicator */
-	if ((flags & FYTTAF_CAN_BE_PLAIN_FLOW) &&
-		fy_is_flow_indicator(cn))
-		flags &= ~FYTTAF_CAN_BE_PLAIN_FLOW;
-
-	if ((flags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW))) {
-		cnn = fy_atom_iter_utf8_peek(&iter);
-		if (fy_is_blankz_m(cnn, fy_token_atom_lb_mode(fyt)) && fy_is_indicator_before_space(cn))
-			flags &= ~(FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW);
-	}
-
-	/* plain unquoted path keys can only start with [a-zA-Z_] */
-	if ((flags & FYTTAF_CAN_BE_UNQUOTED_PATH_KEY) &&
-		!fy_is_first_alpha(cn))
-		flags &= ~FYTTAF_CAN_BE_UNQUOTED_PATH_KEY;
-
-	cp = -1;
-	for (c = cn; c >= 0; cp = c, c = cn) {
-
-		if (col <= 2) {
-			if (cn == '-') {
-				col0si |= (uint8_t)1 << col;
-				if (col0si == 7)
-					flags |= FYTTAF_HAS_START_IND | FYTTAF_QUOTE_AT_0;
-			} else if (cn == '.') {
-				col0ei |= (uint8_t)1 << col;
-				if (col0ei == 7)
-					flags |= FYTTAF_HAS_END_IND | FYTTAF_QUOTE_AT_0;
-			}
-		}
-
-		/* can be -1 on end */
-		cn = fy_atom_iter_utf8_get(&iter);
-
-		/* zero can't be output, only in double quoted mode */
-		if (c == 0) {
-			flags &= ~(FYTTAF_DIRECT_OUTPUT |
-				   FYTTAF_CAN_BE_PLAIN |
-				   FYTTAF_CAN_BE_SINGLE_QUOTED |
-				   FYTTAF_CAN_BE_LITERAL |
-				   FYTTAF_CAN_BE_FOLDED |
-				   FYTTAF_CAN_BE_PLAIN_FLOW |
-				   FYTTAF_CAN_BE_UNQUOTED_PATH_KEY);
-			flags |= FYTTAF_CAN_BE_DOUBLE_QUOTED;
-
-		} else if (fy_is_ws(c)) {
-
-			flags |= FYTTAF_HAS_WS;
-			if (fy_is_ws(cn))
-				flags |= FYTTAF_HAS_CONSECUTIVE_WS;
-
-		} else if (fy_token_is_lb(fyt, c)) {
-
-			flags |= FYTTAF_HAS_LB;
-			if (fy_token_is_lb(fyt, cn))
-				flags |= FYTTAF_HAS_CONSECUTIVE_LB;
-
-			/* only non linebreaks can be simple keys */
-			flags &= ~FYTTAF_CAN_BE_SIMPLE_KEY;
-
-			/* anything with linebreaks, can't be direct */
-			flags &= ~FYTTAF_DIRECT_OUTPUT;
-		}
-
-		if ((flags & FYTTAF_CAN_BE_UNQUOTED_PATH_KEY) && !fy_is_alnum(c))
-			flags &= ~FYTTAF_CAN_BE_UNQUOTED_PATH_KEY;
-
-		/* illegal plain combination */
-		if ((flags & FYTTAF_CAN_BE_PLAIN) &&
-			((c == ':' && fy_is_blankz_m(cn, fy_token_atom_lb_mode(fyt))) ||
-			 (fy_is_blankz_m(c, fy_token_atom_lb_mode(fyt)) && cn == '#') ||
-			 (cp < 0 && c == '#' && cn < 0) ||
-			 !fy_is_print(c))) {
-			flags &= ~(FYTTAF_CAN_BE_PLAIN |
-				   FYTTAF_CAN_BE_PLAIN_FLOW);
-		}
-
-		/* illegal plain flow combination */
-		if ((flags & FYTTAF_CAN_BE_PLAIN_FLOW) &&
-			(fy_is_flow_indicator(c) || (c == ':' && fy_is_flow_indicator(cn))))
-			flags &= ~FYTTAF_CAN_BE_PLAIN_FLOW;
-
-		/* non printable characters, turn off these styles */
-		if (!fy_is_print(c)) {
-			flags &= ~(FYTTAF_CAN_BE_SINGLE_QUOTED | FYTTAF_CAN_BE_LITERAL |
-				   FYTTAF_CAN_BE_FOLDED);
-			flags |= FYTTAF_HAS_NON_PRINT;
-		}
-
-		/* if there's an escape, it can't be direct */
-		if ((flags & FYTTAF_DIRECT_OUTPUT) &&
-		    ((style == FYAS_URI && c == '%') ||
-		     (style == FYAS_SINGLE_QUOTED && c == '\'') ||
-		     (style == FYAS_DOUBLE_QUOTED && c == '\\')))
-			flags &= ~FYTTAF_DIRECT_OUTPUT;
-
-		if (cn < 0 || !c || fy_token_is_lb(fyt, c) || fy_is_ws(c)) {
-			if (span > maxspan)
-				maxspan = span;
-			span = 0;
-		} else
-			span++;
-
-		if (fy_token_is_lb(fyt, c)) {
-			if (col > maxcol)
-				maxcol = col;
-			col = 0;
-			col0si = col0ei = 0;
-		} else
-			col++;
-
-		if (fy_is_any_lb(c))
-			flags |= FYTTAF_HAS_ANY_LB;
-
-		/* last character */
-		if (cn < 0) {
-			/* if ends with whitespace or linebreak, or : can't be plain */
-			if (fy_is_ws(c) || fy_token_is_lb(fyt, c) || c == ':') {
-				flags &= ~(FYTTAF_CAN_BE_PLAIN |
-					   FYTTAF_CAN_BE_PLAIN_FLOW);
-				if (c == ':')
-					flags |= FYTTAF_ENDS_WITH_COLON;
-			}
-		}
-	}
-
-	if (col > maxcol)
-		maxcol = col;
-	if (span > maxspan)
-		maxspan = span;
-out:
-	fy_atom_iter_finish(&iter);
-
-done:
-	fyt->analysis.flags = flags | FYTTAF_ANALYZED;
-	fyt->analysis.maxspan = maxspan;
-	fyt->analysis.maxcol = maxcol;
+	fyt->analysis.flags |= FYTTAF_ANALYZED;
 	return &fyt->analysis;
 }
 
@@ -1648,6 +1468,9 @@ unsigned int fy_analyze_scalar_content(const char *data, size_t size,
 	unsigned int flags;
 	bool first;
 
+	if (!size)
+		return FYACF_EMPTY | FYACF_FLOW_PLAIN | FYACF_BLOCK_PLAIN | FYACF_SIZE0;
+
 	flags = FYACF_EMPTY | FYACF_BLOCK_PLAIN | FYACF_FLOW_PLAIN |
 		FYACF_PRINTABLE | FYACF_SINGLE_QUOTED | FYACF_DOUBLE_QUOTED |
 		FYACF_SIZE0 | FYACF_VALID_ANCHOR;
@@ -1761,11 +1584,10 @@ unsigned int fy_analyze_scalar_content(const char *data, size_t size,
 	if (break_run > 1)
 		flags |= FYACF_TRAILING_LB;
 
-	if ((flags & FYACF_STARTS_WITH_WS) ||
-		(flags & FYACF_STARTS_WITH_LB) ||
-		(flags & FYACF_ENDS_WITH_WS) ||
-		(flags & FYACF_ENDS_WITH_LB))
-		flags &= ~FYACF_FLOW_PLAIN;
+	/* if it's empty it can be plain */
+	if (!(flags & FYACF_EMPTY) && (flags & (FYACF_STARTS_WITH_WS | FYACF_STARTS_WITH_LB |
+		      FYACF_ENDS_WITH_WS | FYACF_ENDS_WITH_LB)))
+		flags &= ~(FYACF_FLOW_PLAIN | FYACF_BLOCK_PLAIN);
 
 	return flags;
 }
@@ -2221,4 +2043,58 @@ bool
 fy_token_scalar_is_null(struct fy_token *fyt)
 {
 	return !fyt || fyt->type != FYTT_SCALAR || fyt->scalar.is_null;
+}
+
+const struct fy_mark *
+fy_token_style_start_mark(struct fy_token *fyt)
+{
+	if (!fyt)
+		return NULL;
+
+	switch (fyt->type) {
+	case FYTT_SCALAR:
+		return &fyt->scalar.style_start;
+	case FYTT_ALIAS:
+		return &fyt->alias.style_start;
+	case FYTT_ANCHOR:
+		return &fyt->anchor.style_start;
+	default:
+		break;
+	}
+	return fy_token_start_mark(fyt);
+}
+
+const struct fy_mark *
+fy_token_style_end_mark(struct fy_token *fyt)
+{
+	if (!fyt)
+		return NULL;
+
+	if (fyt->type != FYTT_SCALAR)
+		return fy_token_end_mark(fyt);
+	return &fyt->scalar.style_end;
+}
+
+struct fy_atom *
+fy_token_get_style_atom(struct fy_token *fyt, struct fy_atom *dst_handle)
+{
+	const struct fy_atom *handle;
+	const struct fy_mark *mark;
+
+	if (!fyt || !dst_handle)
+		return NULL;
+
+	handle = fy_token_atom(fyt);
+	if (!handle)
+		return NULL;
+	*dst_handle = *handle;
+	fy_input_ref(dst_handle->fyi);
+	mark = fy_token_style_start_mark(fyt);
+	if (mark)
+		dst_handle->start_mark = *mark;
+	mark = fy_token_style_end_mark(fyt);
+	if (mark)
+		dst_handle->end_mark = *mark;
+
+	return dst_handle;
 }

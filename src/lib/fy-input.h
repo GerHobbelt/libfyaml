@@ -154,6 +154,21 @@ fy_input_start_size(const struct fy_input *fyi, size_t *sizep)
 		break;
 	}
 
+	/* if we've parsed need to clamp */
+	if (fyi->state == FYIS_PARSED) {
+		switch (fyi->cfg.type) {
+		case fyit_file:
+		case fyit_fd:
+		case fyit_stream:
+		case fyit_callback:
+			if (fyi->allocated < size)
+				size = fyi->allocated;
+			break;
+		default:
+			break;
+		}
+	}
+
 	*sizep = size;
 	return start;
 }
@@ -187,6 +202,11 @@ struct fy_input *fy_input_from_data(const char *data, size_t size,
 				    struct fy_atom *handle, bool simple);
 struct fy_input *fy_input_from_malloc_data(char *data, size_t size,
 					   struct fy_atom *handle, bool simple);
+
+struct fy_input *fy_input_from_data_styled(const char *data, size_t size,
+				    struct fy_atom *handle, enum fy_scalar_style sstyle);
+struct fy_input *fy_input_from_malloc_data_styled(char *data, size_t size,
+					   struct fy_atom *handle, enum fy_scalar_style sstyle);
 
 void fy_input_close(struct fy_input *fyi);
 

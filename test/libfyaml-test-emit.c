@@ -20,6 +20,8 @@
 
 #include <libfyaml.h>
 
+#include "fy-check.h"
+
 struct test_emitter_data {
 	struct fy_emitter *emit;
 	struct fy_emitter_cfg cfg;
@@ -52,8 +54,7 @@ static int collect_output(struct fy_emitter *emit, enum fy_emitter_write_type ty
 	assert(data->alloc >= need);
 	memcpy(data->buf + data->count, str, len);
 	data->count += len;
-	*(char *)(data->buf + data->count) = '\0';
-	data->count++;
+	data->buf[data->count] = '\0';
 
 	return len;
 }
@@ -103,20 +104,350 @@ START_TEST(emit_simple)
 
 	ck_assert_ptr_ne(data.buf, NULL);
 
-	/* the contents must be 'simple' (without a newline) */
-	ck_assert_str_eq(data.buf, "simple");
+	/* the contents must be 'simple' followed by a trailing newline */
+	ck_assert_str_eq(data.buf, "simple\n");
 
 	cleanup_test_emitter(&data);
 }
 END_TEST
 
-TCase *libfyaml_case_emit(void)
+START_TEST(emit_interstitial_comment_single)
 {
-	TCase *tc;
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
 
-	tc = tcase_create("emit");
+	fyd = fy_document_build_from_string(&cfg,
+		"zebra: z\n# above apple\napple: a\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
 
-	tcase_add_test(tc, emit_simple);
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# above apple"), NULL);
 
-	return tc;
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_interstitial_comment_multiple)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"a: 1\n# before b\nb: 2\n# before c\nc: 3\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# before b"), NULL);
+	ck_assert_ptr_ne(strstr(output, "# before c"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_interstitial_and_inline_comment)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"zebra: z # inline\n# above apple\napple: a\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# above apple"), NULL);
+	ck_assert_ptr_ne(strstr(output, "# inline"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_interstitial_comment_nested)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"outer:\n  a: 1\n  # before b\n  b: 2\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# before b"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_interstitial_comment_first_key)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+	const char *first, *second;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"# before first\nfirst: 1\nsecond: 2\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+
+	/* comment should appear exactly once */
+	first = strstr(output, "# before first");
+	ck_assert_ptr_ne(first, NULL);
+	second = strstr(first + 1, "# before first");
+	ck_assert_ptr_eq(second, NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_interstitial_comment_multiline)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"a: 1\n# line one\n# line two\nb: 2\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# line one"), NULL);
+	ck_assert_ptr_ne(strstr(output, "# line two"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_interstitial_comment_with_sort)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	struct fy_node *root;
+	char *output;
+	int rc;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"zebra: z\n# above apple\napple: a\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	root = fy_document_root(fyd);
+	ck_assert_ptr_ne(root, NULL);
+
+	rc = fy_node_mapping_sort(root, NULL, NULL);
+	ck_assert_int_eq(rc, 0);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# above apple"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_interstitial_comment_flow)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"zebra: z\n# above apple\napple: a\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	/* top comments are line-oriented and cannot be represented in flow style;
+	 * they should be silently dropped rather than producing invalid output */
+	output = fy_emit_document_to_string(fyd,
+		FYECF_OUTPUT_COMMENTS | FYECF_MODE_FLOW_ONELINE);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_eq(strstr(output, "# above apple"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_comment_no_duplicate_mapping_in_seq)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+	const char *first, *second;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"- name: zebra\n  val: z\n# above apple entry\n- name: apple\n  val: a\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+
+	/* comment must appear exactly once */
+	first = strstr(output, "# above apple entry");
+	ck_assert_ptr_ne(first, NULL);
+	second = strstr(first + 1, "# above apple entry");
+	ck_assert_ptr_eq(second, NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_comment_no_duplicate_seq_in_mapping)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+	const char *first, *second;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"key1: val1\n# above list\nkey2:\n  - a\n  - b\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+
+	/* comment must appear exactly once */
+	first = strstr(output, "# above list");
+	ck_assert_ptr_ne(first, NULL);
+	second = strstr(first + 1, "# above list");
+	ck_assert_ptr_eq(second, NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_indented_seq_in_map)
+{
+	struct fy_parse_cfg pcfg = { .flags = 0 };
+	struct fy_document *fyd;
+	struct fy_emitter_xcfg xcfg;
+	struct fy_emitter *emit;
+	struct test_emitter_data data;
+	int rc;
+
+	fyd = fy_document_build_from_string(&pcfg,
+		"key:\n- a\n- b\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	memset(&data, 0, sizeof(data));
+	memset(&xcfg, 0, sizeof(xcfg));
+	xcfg.cfg.output = collect_output;
+	xcfg.cfg.userdata = &data;
+	xcfg.cfg.flags = FYECF_DEFAULT | FYECF_EXTENDED_CFG;
+	xcfg.xflags = FYEXCF_INDENTED_SEQ_IN_MAP;
+
+	emit = fy_emitter_create(&xcfg.cfg);
+	ck_assert_ptr_ne(emit, NULL);
+
+	rc = fy_emit_document(emit, fyd);
+	ck_assert_int_eq(rc, 0);
+
+	fy_emitter_destroy(emit);
+	ck_assert_ptr_ne(data.buf, NULL);
+	ck_assert_ptr_ne(strstr(data.buf, "key:\n  - a\n  - b"), NULL);
+
+	free(data.buf);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_indented_seq_in_map_default)
+{
+	struct fy_parse_cfg pcfg = { .flags = 0 };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&pcfg,
+		"key:\n- a\n- b\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_DEFAULT);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "key:\n- a\n- b"), NULL);
+	/* must NOT have the indented form */
+	ck_assert_ptr_eq(strstr(output, "key:\n  - a"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_right_comment_on_flow_sequence_value)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"colors: [red, green] # primary\ncount: 3\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd,
+		FYECF_MODE_ORIGINAL | FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# primary"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_right_comment_on_flow_mapping_value)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"settings: {verbose: true} # defaults\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd,
+		FYECF_MODE_ORIGINAL | FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# defaults"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+void libfyaml_case_emit(struct fy_check_suite *cs)
+{
+	struct fy_check_testcase *ctc;
+
+	ctc = fy_check_suite_add_test_case(cs, "emit");
+
+	fy_check_testcase_add_test(ctc, emit_simple);
+	fy_check_testcase_add_test(ctc, emit_interstitial_comment_single);
+	fy_check_testcase_add_test(ctc, emit_interstitial_comment_multiple);
+	fy_check_testcase_add_test(ctc, emit_interstitial_and_inline_comment);
+	fy_check_testcase_add_test(ctc, emit_interstitial_comment_nested);
+	fy_check_testcase_add_test(ctc, emit_interstitial_comment_first_key);
+	fy_check_testcase_add_test(ctc, emit_interstitial_comment_multiline);
+	fy_check_testcase_add_test(ctc, emit_interstitial_comment_with_sort);
+	fy_check_testcase_add_test(ctc, emit_interstitial_comment_flow);
+	fy_check_testcase_add_test(ctc, emit_comment_no_duplicate_mapping_in_seq);
+	fy_check_testcase_add_test(ctc, emit_comment_no_duplicate_seq_in_mapping);
+	fy_check_testcase_add_test(ctc, emit_indented_seq_in_map);
+	fy_check_testcase_add_test(ctc, emit_indented_seq_in_map_default);
+	fy_check_testcase_add_test(ctc, emit_right_comment_on_flow_sequence_value);
+	fy_check_testcase_add_test(ctc, emit_right_comment_on_flow_mapping_value);
 }

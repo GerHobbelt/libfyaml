@@ -222,7 +222,7 @@ static int fy_document_set_anchor_internal(struct fy_document *fyd, struct fy_no
 				fyam->multiple = true;
 			fya->multiple = true;
 
-			fyd_notice(fyd, "register anchor %.*s is multiple", (int)len, text);
+			fyd_debug(fyd, "register anchor %.*s is multiple", (int)len, text);
 		}
 
 		xle = fy_accel_entry_insert(fyd->axl, fya->anchor, fya);
@@ -884,6 +884,7 @@ struct fy_token *fy_node_non_synthesized_token(struct fy_node *fyn)
 	unsigned int aflags;
 	const char *s, *e;
 	size_t size;
+	bool simple;
 
 	if (!fyn)
 		return NULL;
@@ -927,8 +928,10 @@ struct fy_token *fy_node_non_synthesized_token(struct fy_node *fyn)
 	handle.start_mark = fyt_start->handle.start_mark;
 	handle.end_mark = fyt_end->handle.end_mark;
 
+	simple = (aflags & (FYACF_FLOW_PLAIN | FYACF_BLOCK_PLAIN | FYACF_LB | FYACF_ENDS_WITH_COLON))
+			== (FYACF_FLOW_PLAIN | FYACF_BLOCK_PLAIN);
 	/* if it's plain, all is good */
-	if (aflags & FYACF_FLOW_PLAIN) {
+	if (simple) {
 		handle.storage_hint = size;	/* maximum */
 		handle.storage_hint_valid = false;
 		handle.direct_output = !!(aflags & FYACF_JSON_ESCAPE);	/* direct only when no json escape */
@@ -1110,8 +1113,8 @@ int fy_document_register_anchor(struct fy_document *fyd,
 {
 	struct fy_anchor *fya, *fyam;
 	struct fy_accel_entry *xle;
-	const char *text;
-	size_t text_len;
+	const char *text FY_DEBUG_UNUSED;
+	size_t text_len FY_DEBUG_UNUSED;
 	int rc;
 
 	fya = fy_anchor_create(fyd, fyn, anchor);
@@ -1129,7 +1132,9 @@ int fy_document_register_anchor(struct fy_document *fyd,
 			fya->multiple = true;
 
 			text = fy_anchor_get_text(fya, &text_len);
-			fyd_notice(fyd, "register anchor %.*s is multiple", (int)text_len, text);
+			assert(text);
+			assert(text_len > 0);
+			fyd_debug(fyd, "register anchor %.*s is multiple", (int)text_len, text);
 		}
 
 		xle = fy_accel_entry_insert(fyd->axl, fya->anchor, fya);
@@ -2256,17 +2261,17 @@ int fy_node_insert(struct fy_node *fyn_to, struct fy_node *fyn_from)
 		}
 	}
 
-	/* verify no funkiness on root */
-	assert(fyn_parent || fyn_to == fyd->root);
-
 	/* deleting target */
 	if (!fyn_from) {
 		fyn_to->parent = NULL;
 
 		if (!fyn_parent) {
-			fyd_doc_debug(fyd, "Deleting root node");
+			fyd_doc_debug(fyd, "Deleting %s node", fyd->root == fyn_to ? "root" : "unattached");
 			fy_node_detach_and_free(fyn_to);
-			fyd->root = NULL;
+
+			/* if destination was the root, remove it */
+			if (fyn_to == fyd->root)
+				fyd->root = NULL;
 		} else if (fyn_parent->type == FYNT_SEQUENCE) {
 			fyd_doc_debug(fyd, "Deleting sequence node");
 			fy_node_list_del(&fyn_parent->sequence, fyn_to);
@@ -2470,6 +2475,8 @@ err_out_rc:
 
 int fy_node_delete(struct fy_node *fyn)
 {
+	if (!fyn)
+		return 0;
 	return fy_node_insert(fyn, NULL);
 }
 
@@ -3042,7 +3049,7 @@ int fy_document_resolve(struct fy_document *fyd)
 
 		/* for resolution to work, no reference loops should exist */
 		ret = fy_check_ref_loop(fyd, fyd->root,
-				FYNWF_MAXDEPTH_DEFAULT | FYNWF_FOLLOW, NULL);
+				FYNWF_MAXDEPTH_DEFAULT | FYNWF_FOLLOW, NULL, 0);
 
 		fy_node_clear_system_marks(fyd->root);
 
@@ -3532,7 +3539,14 @@ bool fy_node_is_null(struct fy_node *fyn)
 
 bool fy_node_is_attached(struct fy_node *fyn)
 {
-	return fyn ? fyn->attached : false;
+	if (!fyn)
+		return false;
+
+	if (fyn->attached)
+		return true;
+
+	/* finally root is attached (although the property is not set) */
+	return fyn->fyd && fyn->fyd->root == fyn;
 }
 
 struct fy_node *fy_node_get_parent(struct fy_node *fyn)
@@ -4823,9 +4837,11 @@ struct fy_node *fy_node_create_relative_reference(struct fy_node *fyn_base, stru
 	return fyn_ref;
 }
 
-bool fy_check_ref_loop(struct fy_document *fyd, struct fy_node *fyn,
-		       enum fy_node_walk_flags flags,
-		       struct fy_node_walk_ctx *ctx)
+bool
+fy_check_ref_loop(struct fy_document *fyd, struct fy_node *fyn,
+		  enum fy_node_walk_flags flags,
+		  struct fy_node_walk_ctx *ctx,
+		  unsigned int depth)
 {
 	struct fy_node *fyni;
 	struct fy_node_pair *fynp, *fynpi;
@@ -4834,6 +4850,10 @@ bool fy_check_ref_loop(struct fy_document *fyd, struct fy_node *fyn,
 
 	if (!fyn)
 		return false;
+
+	/* over depth? */
+	if (depth > fy_node_walk_max_depth_from_flags(flags))
+		return true;
 
 	/* visited? no need to check */
 	if (fyn->marks & FY_BIT(FYNWF_VISIT_MARKER))
@@ -4867,7 +4887,7 @@ bool fy_check_ref_loop(struct fy_document *fyd, struct fy_node *fyn,
 
 		fyni = fy_node_follow_alias(fyn, flags);
 
-		ret = fy_check_ref_loop(fyd, fyni, flags, ctxn);
+		ret = fy_check_ref_loop(fyd, fyni, flags, ctxn, depth + 1);
 
 		if (!ctx)
 			fy_node_walk_mark_end(ctxn);
@@ -4881,7 +4901,7 @@ bool fy_check_ref_loop(struct fy_document *fyd, struct fy_node *fyn,
 		for (fyni = fy_node_list_head(&fyn->sequence); fyni;
 				fyni = fy_node_next(&fyn->sequence, fyni)) {
 
-			ret = fy_check_ref_loop(fyd, fyni, flags, ctx);
+			ret = fy_check_ref_loop(fyd, fyni, flags, ctx, depth + 1);
 			if (ret)
 				break;
 		}
@@ -4892,11 +4912,11 @@ bool fy_check_ref_loop(struct fy_document *fyd, struct fy_node *fyn,
 
 			fynpi = fy_node_pair_next(&fyn->mapping, fynp);
 
-			ret = fy_check_ref_loop(fyd, fynp->key, flags, ctx);
+			ret = fy_check_ref_loop(fyd, fynp->key, flags, ctx, depth + 1);
 			if (ret)
 				break;
 
-			ret = fy_check_ref_loop(fyd, fynp->value, flags, ctx);
+			ret = fy_check_ref_loop(fyd, fynp->value, flags, ctx, depth + 1);
 			if (ret)
 				break;
 		}
@@ -5357,11 +5377,12 @@ int fy_document_set_root(struct fy_document *fyd, struct fy_node *fyn)
 	fy_node_detach_and_free(fyd->root);
 	fyd->root = NULL;
 
-	fyn->parent = NULL;
 	fyd->root = fyn;
 
-	if (fyn)
+	if (fyn) {
+		fyn->parent = NULL;
 		fyn->attached = true;
+	}
 
 	return 0;
 }
@@ -5410,7 +5431,28 @@ fy_node_create_scalar_internal(struct fy_document *fyd, const char *data, size_t
 	data_copy = NULL;
 
 	if (!alias) {
-		style = handle.style == FYAS_PLAIN ? FYSS_PLAIN : FYSS_DOUBLE_QUOTED;
+
+		switch (handle.style & ~FYAS_MANUAL_MARK) {
+		case FYAS_PLAIN:
+			style = FYSS_PLAIN;
+			break;
+		case FYAS_SINGLE_QUOTED:
+			style = FYSS_SINGLE_QUOTED;
+			break;
+		case FYAS_DOUBLE_QUOTED:
+			style = FYSS_DOUBLE_QUOTED;
+			break;
+		case FYAS_LITERAL:
+			style = FYSS_LITERAL;
+			break;
+		case FYAS_FOLDED:
+			style = FYSS_FOLDED;
+			break;
+		default:
+			style = FYSS_DOUBLE_QUOTED;
+			break;
+		}
+
 		fyn->scalar = fy_token_create(FYTT_SCALAR, &handle, style);
 	} else
 		fyn->scalar = fy_token_create(FYTT_ALIAS, &handle, NULL);
@@ -6391,8 +6433,8 @@ int fy_node_vscanf(struct fy_node *fyn, const char *fmt, va_list ap)
 		if (t < e)
 			*t++ = '\0';
 
-		/* find by (relative) path */
-		fynv = fy_node_by_path(fyn, key, t - s, FYNWF_DONT_FOLLOW);
+		/* find by (relative) path - note that the size has changed */
+		fynv = fy_node_by_path(fyn, key, te - key, FYNWF_DONT_FOLLOW);
 		if (!fynv || fynv->type != FYNT_SCALAR)
 			break;
 

@@ -342,6 +342,7 @@ fy_eventp_vcreate_internal(struct fy_eventp_list *recycled_list, struct fy_diag 
 	case FYET_ALIAS:
 
 		if (type == FYET_SCALAR) {
+			fye->scalar.value = fye->scalar.anchor = fye->scalar.tag = NULL;
 			sstyle = va_arg(ap, enum fy_scalar_style);
 			value = va_arg(ap, const char *);
 			len = va_arg(ap, size_t);
@@ -352,6 +353,7 @@ fy_eventp_vcreate_internal(struct fy_eventp_list *recycled_list, struct fy_diag 
 			if (len == FY_NT)
 				len = strlen(value);
 		} else {
+			fye->alias.anchor = NULL;
 			sstyle = FYSS_PLAIN;
 			value = va_arg(ap, const char *);
 			if (!value) {
@@ -372,7 +374,7 @@ fy_eventp_vcreate_internal(struct fy_eventp_list *recycled_list, struct fy_diag 
 		memcpy(data, value, len);
 		/* always NULL terminate */
 		data[len] = '\0';
-		fyi = fy_input_from_malloc_data(data, len, &handle, sstyle == FYSS_PLAIN);
+		fyi = fy_input_from_malloc_data_styled(data, len, &handle, sstyle);
 		if (!fyi) {
 			fy_error(diag, "fy_input_from_malloc_data() failed\n");
 			goto err_out;
@@ -422,7 +424,7 @@ fy_eventp_vcreate_internal(struct fy_eventp_list *recycled_list, struct fy_diag 
 		/* always NULL terminate */
 		data[len] = '\0';
 
-		fyi = fy_input_from_malloc_data(data, len, &handle, true);
+		fyi = fy_input_from_malloc_data(data, len, &handle, false);
 		if (!fyi) {
 			fy_error(diag, "fy_input_from_malloc_data() failed\n");
 			goto err_out;
@@ -470,7 +472,7 @@ fy_eventp_vcreate_internal(struct fy_eventp_list *recycled_list, struct fy_diag 
 			goto err_out;
 		}
 
-		fyi = fy_input_from_malloc_data(data, len, &handle, true);
+		fyi = fy_input_from_malloc_data(data, len, &handle, false);
 		if (!fyi)
 			goto err_out;
 		data = NULL;
@@ -796,7 +798,8 @@ struct fy_token *fy_event_get_tag_token(struct fy_event *fye)
 	return NULL;
 }
 
-const struct fy_mark *fy_event_start_mark(struct fy_event *fye)
+const struct fy_mark *
+fy_event_start_mark(struct fy_event *fye)
 {
 	if (!fye)
 		return NULL;
@@ -840,7 +843,8 @@ const struct fy_mark *fy_event_start_mark(struct fy_event *fye)
 	return NULL;
 }
 
-const struct fy_mark *fy_event_end_mark(struct fy_event *fye)
+const struct fy_mark *
+fy_event_end_mark(struct fy_event *fye)
 {
 	if (!fye)
 		return NULL;
@@ -883,6 +887,103 @@ const struct fy_mark *fy_event_end_mark(struct fy_event *fye)
 
 	return NULL;
 }
+
+const struct fy_mark *
+fy_event_style_start_mark(struct fy_event *fye)
+{
+	if (!fye)
+		return NULL;
+
+	switch (fye->type) {
+	case FYET_NONE:
+		break;
+
+	case FYET_STREAM_START:
+		return fy_token_style_start_mark(fye->stream_start.stream_start);
+
+	case FYET_STREAM_END:
+		return fy_token_style_start_mark(fye->stream_end.stream_end);
+
+	case FYET_DOCUMENT_START:
+		return fy_token_style_start_mark(fye->document_start.document_start);
+
+	case FYET_DOCUMENT_END:
+		return fy_token_style_start_mark(fye->document_end.document_end);
+
+	case FYET_MAPPING_START:
+		if (fye->mapping_start.tag)
+			return fy_token_style_start_mark(fye->mapping_start.tag);
+		return fy_token_style_start_mark(fye->mapping_start.mapping_start);
+
+	case FYET_MAPPING_END:
+		return fy_token_style_start_mark(fye->mapping_end.mapping_end);
+
+	case FYET_SEQUENCE_START:
+		if (fye->sequence_start.tag)
+			return fy_token_style_start_mark(fye->sequence_start.tag);
+		return fy_token_style_start_mark(fye->sequence_start.sequence_start);
+
+	case FYET_SEQUENCE_END:
+		return fy_token_style_start_mark(fye->sequence_end.sequence_end);
+
+	case FYET_SCALAR:
+		if (fye->scalar.tag)
+			return fy_token_style_start_mark(fye->scalar.tag);
+		return fy_token_style_start_mark(fye->scalar.value);
+
+	case FYET_ALIAS:
+		return fy_token_style_start_mark(fye->alias.anchor);
+
+	}
+
+	return NULL;
+}
+
+const struct fy_mark *
+fy_event_style_end_mark(struct fy_event *fye)
+{
+	if (!fye)
+		return NULL;
+
+	switch (fye->type) {
+	case FYET_NONE:
+		break;
+
+	case FYET_STREAM_START:
+		return fy_token_style_end_mark(fye->stream_start.stream_start);
+
+	case FYET_STREAM_END:
+		return fy_token_style_end_mark(fye->stream_end.stream_end);
+
+	case FYET_DOCUMENT_START:
+		return fy_token_style_end_mark(fye->document_start.document_start);
+
+	case FYET_DOCUMENT_END:
+		return fy_token_style_end_mark(fye->document_end.document_end);
+
+	case FYET_MAPPING_START:
+		return fy_token_style_end_mark(fye->mapping_start.mapping_start);
+
+	case FYET_MAPPING_END:
+		return fy_token_style_end_mark(fye->mapping_end.mapping_end);
+
+	case FYET_SEQUENCE_START:
+		return fy_token_style_end_mark(fye->sequence_start.sequence_start);
+
+	case FYET_SEQUENCE_END:
+		return fy_token_style_end_mark(fye->sequence_end.sequence_end);
+
+	case FYET_SCALAR:
+		return fy_token_style_end_mark(fye->scalar.value);
+
+	case FYET_ALIAS:
+		return fy_token_style_end_mark(fye->alias.anchor);
+
+	}
+
+	return NULL;
+}
+
 
 enum fy_node_style
 fy_event_get_node_style(struct fy_event *fye)

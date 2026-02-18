@@ -104,6 +104,10 @@ static inline bool fy_token_type_is_mapping_marker(enum fy_token_type type)
 #define FYTTAF_HAS_END_IND		FY_BIT(20)	/* has ... at col 0 */
 #define FYTTAF_HAS_NON_PRINT		FY_BIT(21)	/* has any non printable utf8 */
 #define FYTTAF_ENDS_WITH_COLON		FY_BIT(22)	/* ends with a colon */
+#define FYTTAF_ALL_WS_LB		FY_BIT(23)	/* everything is ws or linebreak */
+#define FYTTAF_ALL_PRINT_ASCII		FY_BIT(24)	/* everything is >= '!' && <= '~' */
+#define FYTTAF_HAS_START_WS		FY_BIT(25)	/* leads with whitespace */
+#define FYTTAF_SIZE0			FY_BIT(26)	/* zero sized */
 
 #define FYTTAF_ANALYZED			FY_BIT(31)	/* analyzed mark */
 
@@ -144,6 +148,8 @@ struct fy_token {
 		struct {
 			enum fy_scalar_style style;
 			/* path key (if requested only) */
+			struct fy_mark style_start;
+			struct fy_mark style_end;
 			const char *path_key;
 			size_t path_key_len;
 			char *path_key_storage;	/* if this is not null, it's \0 terminated */
@@ -175,8 +181,12 @@ struct fy_token {
 			int end_index;
 		} seq_slice;
 		struct {
+			struct fy_mark style_start;
 			struct fy_path_expr *expr;
 		} alias;
+		struct {
+			struct fy_mark style_start;
+		} anchor;
 		struct {
 			int flow_level;
 		} key;
@@ -562,5 +572,9 @@ fy_token_get_type_inline(struct fy_token *fyt)
 {
 	return fyt ? fyt->type : FYTT_NONE;
 }
+
+/* needs fy_input_unref(handle->fyi) */
+struct fy_atom *
+fy_token_get_style_atom(struct fy_token *fyt, struct fy_atom *dst_handle);
 
 #endif

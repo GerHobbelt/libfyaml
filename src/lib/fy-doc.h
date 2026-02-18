@@ -157,7 +157,8 @@ bool fy_node_is_empty(struct fy_node *fyn);
 
 bool fy_check_ref_loop(struct fy_document *fyd, struct fy_node *fyn,
 		       enum fy_node_walk_flags flags,
-		       struct fy_node_walk_ctx *ctx);
+		       struct fy_node_walk_ctx *ctx,
+		       unsigned int depth);
 
 #define FYNWF_VISIT_MARKER	(FYNWF_MAX_USER_MARKER + 1)
 #define FYNWF_REF_MARKER	(FYNWF_MAX_USER_MARKER + 2)
@@ -303,19 +304,17 @@ void fy_document_diag_report(struct fy_document *fyd,
 
 #ifdef FY_DEVMODE
 
-#define fyd_debug(_fyd, _module, _fmt, ...) \
+#define fyd_debug(_fyd, _fmt, ...) \
 	do { \
 		struct fy_document *__fyd = (_fyd); \
-		enum fy_error_module __module = (_module); \
-		\
-		if (fyd_debug_log_level_is_enabled(__fyd, __module)) \
-			fy_document_diag(__fyd, FYET_DEBUG | FYDF_MODULE(_module), \
+		if (fyd_debug_log_level_is_enabled(__fyd, FYEM_DOC)) \
+			fy_document_diag(__fyd, FYET_DEBUG, \
 					__FILE__, __LINE__, __func__, \
 					(_fmt) , ## __VA_ARGS__); \
 	} while(0)
 #else
 
-#define fyd_debug(_fyd, _module, _fmt, ...) \
+#define fyd_debug(_fyd, _fmt, ...) \
 	do { } while(0)
 
 #endif
@@ -334,7 +333,7 @@ void fy_document_diag_report(struct fy_document *fyd,
 			(_fmt) , ## __VA_ARGS__)
 
 #define fyd_doc_debug(_fyd, _fmt, ...) \
-	fyd_debug((_fyd), FYEM_DOC, (_fmt) , ## __VA_ARGS__)
+	fyd_debug((_fyd), (_fmt) , ## __VA_ARGS__)
 
 #define fyd_error_check(_fyd, _cond, _label, _fmt, ...) \
 	do { \
