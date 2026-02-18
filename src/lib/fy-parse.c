@@ -2081,7 +2081,7 @@ err_out:
 	return false;
 }
 
-int fy_scan_tag_handle_length(struct fy_parser *fyp, int start)
+int fy_scan_tag_handle_length(struct fy_parser *fyp, int start, bool req_end_bang)
 {
 	int c, length, i, width;
 	ssize_t offset;
@@ -2152,6 +2152,10 @@ int fy_scan_tag_handle_length(struct fy_parser *fyp, int start)
 		c = fy_parse_peek_at_internal(fyp, start + length, &offset);
 	}
 
+	FYP_PARSE_ERROR_CHECK(fyp, start + length, 1, FYEM_SCAN,
+			!req_end_bang || c == '!', err_out,
+			"Missing required ! at end of tag handle");
+
 	/* if last character is !, copy it */
 	if (c == '!')
 		length++;
@@ -2217,28 +2221,29 @@ int fy_scan_directive(struct fy_parser *fyp)
 	enum fy_reader_mode rdmode;
 	enum fy_token_type type = FYTT_NONE;
 	struct fy_atom handle;
-	bool is_uri_valid;
+	bool is_uri_valid, only_ws;
 	struct fy_token *fyt;
 	int i, lastc;
 
-	if (!fy_parse_strcmp(fyp, "YAML") && fy_is_ws(fy_parse_peek_at(fyp, 4))) {
-		advance = 5;
+	if (!fy_parse_strcmp(fyp, "YAML") && fy_is_blank_lb_r_n(fy_parse_peek_at(fyp, 4)))
 		type = FYTT_VERSION_DIRECTIVE;
-	} else if (!fy_parse_strcmp(fyp, "TAG") && fy_is_ws(fy_parse_peek_at(fyp, 3))) {
-		advance = 4;
+	else if (!fy_parse_strcmp(fyp, "TAG") && fy_is_blank_lb_r_n(fy_parse_peek_at(fyp, 3)))
 		type = FYTT_TAG_DIRECTIVE;
-	} else {
+	else {
 		/* skip until linebreak (or #) */
 		i = 0;
 		lastc = -1;
+		only_ws = true;
 		while ((c = fy_parse_peek_at(fyp, i)) >= 0 && !fyp_is_lb(fyp, c)) {
 			if (fy_is_ws(lastc) && c == '#')
 				break;
+			if (!fy_is_ws(c))
+				only_ws = false;
 			lastc = c;
 			i++;
 		}
 
-		FYP_PARSE_ERROR_CHECK(fyp, i, 1, FYEM_SCAN, i > 0, err_out,
+		FYP_PARSE_ERROR_CHECK(fyp, i, 1, FYEM_SCAN, !only_ws, err_out,
 			"Directive indicator %% without a directive");
 
 		FYP_PARSE_WARNING(fyp, 0, i, FYEM_SCAN,
@@ -2264,11 +2269,21 @@ int fy_scan_directive(struct fy_parser *fyp)
 		return 0;
 	}
 
-	fyp_error_check(fyp, type != FYTT_NONE, err_out,
-			"neither YAML|TAG found");
+	/* advance over the YAML/TAG part */
+	advance = type == FYTT_VERSION_DIRECTIVE ? 4 : 3;
 
 	/* advance */
 	fy_advance_by(fyp, advance);
+
+	/* must be a whitespace after YAML/TAG */
+	c = fy_parse_peek(fyp);
+
+	FYP_PARSE_ERROR_CHECK(fyp, 0, 1, FYEM_SCAN,
+			fy_is_ws(c), err_out,
+			"illegal empty %%%s directive",
+			type == FYTT_VERSION_DIRECTIVE ? "YAML" : "TAG");
+
+	fy_advance(fyp, c);
 
 	/* skip white space */
 	while (fy_is_ws(c = fy_parse_peek(fyp)))
@@ -2300,7 +2315,7 @@ int fy_scan_directive(struct fy_parser *fyp)
 
 	} else {
 
-		tag_length = fy_scan_tag_handle_length(fyp, 0);
+		tag_length = fy_scan_tag_handle_length(fyp, 0, true);
 		fyp_error_check(fyp, tag_length > 0, err_out,
 				"fy_scan_tag_handle_length() failed");
 
@@ -3366,7 +3381,7 @@ int fy_fetch_tag(struct fy_parser *fyp, int c)
 	else {
 		/* either !suffix or !handle!suffix */
 		/* we scan back to back, and split handle/suffix */
-		handle_length = fy_scan_tag_handle_length(fyp, prefix_length);
+		handle_length = fy_scan_tag_handle_length(fyp, prefix_length, false);
 		fyp_error_check(fyp, handle_length > 0, err_out,
 				"fy_scan_tag_handle_length() failed");
 	}
@@ -6301,8 +6316,8 @@ static struct fy_eventp *fy_parse_internal(struct fy_parser *fyp)
 			fyp_parse_debug(fyp, "document_start_implicit=true");
 
 			FYP_TOKEN_ERROR_CHECK(fyp, fyt, FYEM_PARSE,
-					fyt->type != FYTT_DOCUMENT_END || !had_directives, err_out,
-					"directive(s) without a document");
+					!had_directives, err_out,
+					"missing required document start indicator after directives");
 
 			fy_parse_state_set(fyp, FYPS_BLOCK_NODE);
 		} else {
