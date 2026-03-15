@@ -496,6 +496,32 @@ START_TEST(fuzz_node_by_path_parens_sequence)
 }
 END_TEST
 
+/* Test: parse comment-heavy input with PARSE_COMMENTS | PREFER_RECURSIVE and emit with many flags */
+START_TEST(fuzz_parse_comments_recursive_emit)
+{
+	char buf[] = "\x23\x63\x3a\x0d\x0a\x23\x3a\x0a\x23\x24\x0d\x01\x7c\x23\x3a\x09\x52\x25\x42";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd = NULL;
+	FILE *fp = NULL;
+
+	cfg.flags = FYPCF_PARSE_COMMENTS | FYPCF_DISABLE_ACCELERATORS | FYPCF_PREFER_RECURSIVE;
+
+	fyd = fy_document_build_from_string(&cfg, buf, FY_NT);
+	if (!fyd)
+		return;
+
+	fp = fopen("/dev/null", "w");
+	if (!fp)
+		goto out;
+
+	fy_emit_document_to_fp(fyd, FYECF_STRIP_DOC | FYECF_NO_ENDING_NEWLINE | FYECF_MODE_BLOCK | FYECF_MODE_FLOW_ONELINE | FYECF_MODE_JSON | FYECF_MODE_JSON_TP | FYECF_MODE_JSON_ONELINE | FYECF_MODE_DEJSON | FYECF_MODE_MANUAL | FYECF_MODE_JSON_COMPACT, fp);
+
+out:
+	if (fp) fclose(fp);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
 #ifdef __linux__
 
 /* Test: fy_document_build_from_fp with ":\r:" and recursive resolve + duplicate keys */
@@ -520,6 +546,343 @@ START_TEST(fuzz_build_from_fp_recursive_duplicate_keys)
 END_TEST
 
 #endif
+
+#if defined(__linux__)
+
+static void fuzz_dump_testsuite_event(struct fy_parser *fyp, struct fy_event *fye)
+{
+	const char *anchor = NULL;
+	const char *tag = NULL;
+	const char *text = NULL;
+	const char *alias = NULL;
+	size_t anchor_len = 0, tag_len = 0, text_len = 0, alias_len = 0;
+	const struct fy_mark *sm, *em = NULL;
+
+	sm = fy_event_start_mark(fye);
+	em = fy_event_end_mark(fye);
+	(void)sm; (void)em;
+
+	switch (fye->type) {
+	case FYET_NONE:
+	case FYET_STREAM_START:
+	case FYET_STREAM_END:
+	case FYET_DOCUMENT_START:
+	case FYET_DOCUMENT_END:
+	case FYET_MAPPING_END:
+	case FYET_SEQUENCE_END:
+	case FYET_ALIAS:
+		break;
+	case FYET_MAPPING_START:
+		if (fye->mapping_start.anchor)
+			anchor = fy_token_get_text(fye->mapping_start.anchor, &anchor_len);
+		if (fye->mapping_start.tag)
+			tag = fy_token_get_text(fye->mapping_start.tag, &tag_len);
+		break;
+	case FYET_SEQUENCE_START:
+		if (fye->sequence_start.anchor)
+			anchor = fy_token_get_text(fye->sequence_start.anchor, &anchor_len);
+		if (fye->sequence_start.tag)
+			tag = fy_token_get_text(fye->sequence_start.tag, &tag_len);
+		break;
+	case FYET_SCALAR:
+		if (fye->scalar.anchor)
+			anchor = fy_token_get_text(fye->scalar.anchor, &anchor_len);
+		if (fye->scalar.tag)
+			tag = fy_token_get_text(fye->scalar.tag, &tag_len);
+		break;
+	default:
+		break;
+	}
+
+	switch (fye->type) {
+	default:
+		break;
+	case FYET_SCALAR:
+		text = fy_token_get_text(fye->scalar.value, &text_len);
+		break;
+	case FYET_ALIAS:
+		alias = fy_token_get_text(fye->alias.anchor, &alias_len);
+		break;
+	}
+
+	(void)anchor; (void)anchor_len;
+	(void)tag; (void)tag_len;
+	(void)text; (void)text_len;
+	(void)alias; (void)alias_len;
+}
+
+/* Test: parse ">\x00\x09\x0d" via fy_parser_parse event loop */
+START_TEST(fuzz_parser_event_loop_block_scalar)
+{
+	char buf[] = "\x3e\x00\x09\x0d";
+	struct fy_parser *fyp = NULL;
+	struct fy_parse_cfg cfg = {0};
+	struct fy_event *fyev = NULL;
+	FILE *f = NULL;
+
+	f = fmemopen((void *)buf, 4, "r");
+	if (!f)
+		return;
+
+	fyp = fy_parser_create(&cfg);
+	if (!fyp)
+		goto out;
+
+	if (fy_parser_set_input_fp(fyp, NULL, f) != 0)
+		goto out;
+
+	while ((fyev = fy_parser_parse(fyp)) != NULL) {
+		fuzz_dump_testsuite_event(fyp, fyev);
+		fy_parser_event_free(fyp, fyev);
+	}
+
+out:
+	if (f) fclose(f);
+	fy_parser_destroy(fyp);
+}
+END_TEST
+
+#endif
+
+/* Test: parse sequence with embedded comments using COLLECT_DIAG | DISABLE_RECYCLING | PARSE_COMMENTS | DISABLE_BUFFERING */
+START_TEST(fuzz_collect_diag_parse_comments_sequence)
+{
+	char data[] = "- foo\n#\n\n#\n- G";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd = NULL;
+
+	cfg.flags = FYPCF_COLLECT_DIAG | FYPCF_DISABLE_RECYCLING | FYPCF_PARSE_COMMENTS | FYPCF_DISABLE_BUFFERING | FYPCF_JSON_NONE;
+
+	fyd = fy_document_build_from_string(&cfg, data, FY_NT);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+/* Test: parse quoted scalar, clone document, and compare nodes via multiple compare APIs */
+START_TEST(fuzz_node_compare_clone_quoted_scalar)
+{
+	char data[] = "'''''''''''' ";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd = NULL;
+	struct fy_document *fyd2 = NULL;
+	struct fy_node *root, *root2;
+	bool same, equal, matches, text_matches;
+
+	cfg.flags = FYPCF_PREFER_RECURSIVE | FYPCF_YPATH_ALIASES | FYPCF_ALLOW_DUPLICATE_KEYS;
+
+	fyd = fy_document_build_from_string(&cfg, data, FY_NT);
+	if (!fyd)
+		return;
+
+	root = fy_document_root(fyd);
+	if (!root)
+		goto out;
+
+	same = fy_node_compare(root, root);
+	(void)same;
+
+	fyd2 = fy_document_clone(fyd);
+	if (!fyd2)
+		goto out;
+
+	root2 = fy_document_root(fyd2);
+	equal = fy_node_compare(root, root2);
+	matches = fy_node_compare_string(root, data, FY_NT);
+	text_matches = fy_node_compare_text(root, data, FY_NT);
+	(void)equal; (void)matches; (void)text_matches;
+
+out:
+	fy_document_destroy(fyd);
+	fy_document_destroy(fyd2);
+}
+END_TEST
+
+/* Test: parse comment with override */
+START_TEST(fuzz_parse_comment_with_override)
+{
+	char buf[] = "- a: b\n  # end\n# bottom\n";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd;
+
+	cfg.flags = FYPCF_PARSE_COMMENTS | FYPCF_DISABLE_ACCELERATORS | FYPCF_PREFER_RECURSIVE;
+
+	fyd = fy_document_build_from_string(&cfg, buf, FY_NT);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(fuzz_resolve_document_ypath_null_alias)
+{
+	char buf[] = ":\n*.null";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd;
+
+	cfg.flags = FYPCF_RESOLVE_DOCUMENT | FYPCF_YPATH_ALIASES;
+
+	fyd = fy_document_build_from_string(&cfg, buf, FY_NT);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+#if defined(__linux__)
+START_TEST(fuzz_build_from_fp_ypath_aliases_recursive)
+{
+	char buf[] = "\n? - :\n? - : - */**";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd;
+	FILE *f;
+
+	cfg.flags = FYPCF_RESOLVE_DOCUMENT | FYPCF_PREFER_RECURSIVE | FYPCF_YPATH_ALIASES;
+
+	f = fmemopen((void *)buf, strlen(buf), "r");
+	fyd = fy_document_build_from_fp(&cfg, f);
+	if (f)
+		fclose(f);
+	fy_document_destroy(fyd);
+}
+END_TEST
+#endif
+
+START_TEST(fuzz_path_expr_build_bang_triple_star)
+{
+	struct fy_path_parse_cfg parse_cfg = {0};
+	struct fy_path_expr *expr;
+
+	expr = fy_path_expr_build_from_string(&parse_cfg, "!***", FY_NT);
+	fy_path_expr_free(expr);
+}
+END_TEST
+
+START_TEST(fuzz_resolve_recursive_ypath_aliases_dup_keys)
+{
+	char buf[] = "*//!!";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd;
+
+	cfg.flags = FYPCF_RESOLVE_DOCUMENT | FYPCF_PREFER_RECURSIVE |
+		    FYPCF_YPATH_ALIASES | FYPCF_ALLOW_DUPLICATE_KEYS;
+
+	fyd = fy_document_build_from_string(&cfg, buf, FY_NT);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(fuzz_disable_recycling_ypath_aliases_dup_keys)
+{
+	char buf[] = "*((0)/*";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd;
+
+	cfg.flags = FYPCF_RESOLVE_DOCUMENT | FYPCF_DISABLE_RECYCLING |
+		    FYPCF_YPATH_ALIASES | FYPCF_ALLOW_DUPLICATE_KEYS;
+
+	fyd = fy_document_build_from_string(&cfg, buf, FY_NT);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+#if defined(__linux__)
+START_TEST(fuzz_build_from_fp_sloppy_recursive_ypath_aliases)
+{
+	char data[] = "\x2a\x27\x2f\x2a\x27\x27\x24\x09\x09\x3a\x0a\x72\x3a\x0a\x2a\x2f\x72\x2f";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd;
+	FILE *f;
+
+	cfg.flags = FYPCF_RESOLVE_DOCUMENT | FYPCF_DISABLE_ACCELERATORS |
+		    FYPCF_SLOPPY_FLOW_INDENTATION | FYPCF_PREFER_RECURSIVE |
+		    FYPCF_YPATH_ALIASES;
+
+	f = fmemopen((void *)data, strlen(data), "r");
+	fyd = fy_document_build_from_fp(&cfg, f);
+	if (f)
+		fclose(f);
+	fy_document_destroy(fyd);
+}
+END_TEST
+#endif
+
+START_TEST(fuzz_parse_comments_emit_many_modes)
+{
+	char data[] =
+		"\x3a\x3a\x20\x3a\x20\x3a\x3a\x20\x3a\x20\x3f\x01\x05\x3a\x20\x3a\x20"
+		"\x3f\x20\x3a\x3a\x20\x3a\x20\x3a\x20\x3a\x3a\x20\x3a\x20\x3f\x3a\x20"
+		"\x3a\x20\x3b\x20\x3f\x01\x05\x3a\x20\x3a\x20\x3f\x20\x3a\x3a\x20\x3a"
+		"\x20\x3a\x20\x3a\x3a\x20\x3a\x20\x3f\x3a\x20\x3a\x20\x3b\x20\x3f\x01"
+		"\x05\x3a\x20\x3a\x20\x3f\x20\x3a\x3a\x20\x3a\x20\x3a\x20\x3a\x3a\x20"
+		"\x3a\x20\x3f\x3a\x20\x3a\x20\x3b\x20\x3f\x20\x3a\x3f\x01\x05\x3a\x20"
+		"\x3a\x20\x3f\x20\x3a\x3a\x20\x3a\x20\x3a\x20\x3a\x3a\x20\x3a\x20\x3a"
+		"\x3a\x20\x3a\x20\x3f\x3a\x20\x3a\x20\x3b\x20\x3f\x20\x3a\x3a\x55\x55"
+		"\x55\x55\x20\x3a\x3a\x20\x3a\x20\x3a\x20\x3f\x20\x3a\x3a\x20\x3a\x20"
+		"\x3a\x20\x3a\x3a\x20\x3a\x20\x3f\x3a\x20\x3a\x20\x3b\x20\x3f\x20\x3a"
+		"\x3f\x01\x05\x3a\x20\x3a\x20\x3f\x20\x3a\x3f\x20\x3a\x3f\x01\x05\x20"
+		"\x3a\x3a\x20\x20\x3a\x20\x3f";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd;
+	struct fy_emitter *emitter;
+	char *collected;
+	char buf[4096];
+	int eflags;
+	int rc;
+
+	cfg.flags = FYPCF_DISABLE_RECYCLING | FYPCF_PARSE_COMMENTS;
+	eflags = FYECF_OUTPUT_COMMENTS |
+		 FYECF_WIDTH_DEFAULT | FYECF_WIDTH_80 | FYECF_WIDTH_132 | FYECF_WIDTH_INF |
+		 FYECF_MODE_BLOCK | FYECF_MODE_FLOW | FYECF_MODE_FLOW_ONELINE |
+		 FYECF_MODE_JSON | FYECF_MODE_JSON_TP | FYECF_MODE_JSON_ONELINE |
+		 FYECF_MODE_DEJSON | FYECF_MODE_PRETTY | FYECF_MODE_MANUAL |
+		 FYECF_MODE_FLOW_COMPACT | FYECF_MODE_JSON_COMPACT |
+		 FYECF_TAG_DIR_OFF | FYECF_TAG_DIR_ON;
+
+	fyd = fy_document_build_from_string(&cfg, data, FY_NT);
+	if (!fyd)
+		return;
+
+	memset(buf, 0, sizeof(buf));
+	rc = fy_emit_document_to_buffer(fyd, eflags, buf, sizeof(buf));
+	(void)rc;
+
+	emitter = fy_emit_to_string(eflags);
+	if (emitter) {
+		fy_emit_document(emitter, fyd);
+		size_t out_size;
+		collected = fy_emit_to_string_collect(emitter, &out_size);
+		free(collected);
+	}
+	fy_emitter_destroy(emitter);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(fuzz_resolve_recursive_ypath_dup_keys_emit_fp)
+{
+	char data[] = "\x0a\x2a\x2f\x2a\x2f\x5e\x2f\x2a\x2f\x20\x09\x09\x3a\x0a\x72\x3a"
+		      "\x0a\x2a\x5e\x2f\x2a\x2f\x20\x09\x09\x3a\x0a\x2a\x2f\x5e";
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd;
+	FILE *fp;
+	int rc;
+
+	cfg.flags = FYPCF_RESOLVE_DOCUMENT | FYPCF_PREFER_RECURSIVE |
+		    FYPCF_YPATH_ALIASES | FYPCF_ALLOW_DUPLICATE_KEYS;
+
+	fyd = fy_document_build_from_string(&cfg, data, FY_NT);
+	if (!fyd)
+		return;
+
+	fp = fopen("/dev/null", "w");
+	rc = fy_emit_document_to_fp(fyd,
+		FYECF_MODE_BLOCK | FYECF_MODE_FLOW_ONELINE | FYECF_MODE_JSON |
+		FYECF_MODE_JSON_TP | FYECF_MODE_JSON_ONELINE | FYECF_MODE_DEJSON |
+		FYECF_MODE_MANUAL | FYECF_MODE_JSON_COMPACT,
+		fp);
+	(void)rc;
+	if (fp)
+		fclose(fp);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
 
 void libfyaml_case_fuzzing(struct fy_check_suite *cs)
 {
@@ -561,7 +924,24 @@ void libfyaml_case_fuzzing(struct fy_check_suite *cs)
 	fy_check_testcase_add_test(ctc, fuzz_node_build_string_block_scalar);
 	fy_check_testcase_add_test(ctc, fuzz_node_by_path_dot_slash_emit);
 	fy_check_testcase_add_test(ctc, fuzz_node_by_path_parens_sequence);
+	fy_check_testcase_add_test(ctc, fuzz_parse_comments_recursive_emit);
 #ifdef __linux__
 	fy_check_testcase_add_test(ctc, fuzz_build_from_fp_recursive_duplicate_keys);
+#endif
+#if defined(__linux__)
+	fy_check_testcase_add_test(ctc, fuzz_parser_event_loop_block_scalar);
+#endif
+	fy_check_testcase_add_test(ctc, fuzz_collect_diag_parse_comments_sequence);
+	fy_check_testcase_add_test(ctc, fuzz_node_compare_clone_quoted_scalar);
+	fy_check_testcase_add_test(ctc, fuzz_parse_comment_with_override);
+	fy_check_testcase_add_test(ctc, fuzz_resolve_document_ypath_null_alias);
+	fy_check_testcase_add_test(ctc, fuzz_path_expr_build_bang_triple_star);
+	fy_check_testcase_add_test(ctc, fuzz_resolve_recursive_ypath_aliases_dup_keys);
+	fy_check_testcase_add_test(ctc, fuzz_disable_recycling_ypath_aliases_dup_keys);
+	fy_check_testcase_add_test(ctc, fuzz_parse_comments_emit_many_modes);
+	fy_check_testcase_add_test(ctc, fuzz_resolve_recursive_ypath_dup_keys_emit_fp);
+#if defined(__linux__)
+	fy_check_testcase_add_test(ctc, fuzz_build_from_fp_sloppy_recursive_ypath_aliases);
+	fy_check_testcase_add_test(ctc, fuzz_build_from_fp_ypath_aliases_recursive);
 #endif
 }

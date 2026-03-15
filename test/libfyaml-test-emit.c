@@ -429,6 +429,449 @@ START_TEST(emit_right_comment_on_flow_mapping_value)
 }
 END_TEST
 
+START_TEST(emit_nested_mapping_top_comment)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"jobs:\n  build:\n    # comment before runs-on\n    runs-on: ubuntu-latest\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# comment before runs-on"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_nested_sequence_top_comment)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"parent:\n  # comment before first item\n  - item1\n  - item2\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# comment before first item"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_deeply_nested_top_comment)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"a:\n  b:\n    c:\n      # deep comment\n      d: value\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# deep comment"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_root_top_comment_still_works)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	fyd = fy_document_build_from_string(&cfg,
+		"# root comment\nkey: value\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "# root comment"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_block_scalar_clip_chomp_preserved)
+{
+	struct fy_document *fyd;
+	char *output;
+
+	/* literal block with default (clip) chomping: | */
+	fyd = fy_document_build_from_string(NULL,
+		"key: |\n  hello\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_DEFAULT);
+	ck_assert_ptr_ne(output, NULL);
+	/* must contain "|\n" (clip) not "|+\n" (keep) */
+	ck_assert_ptr_ne(strstr(output, "|\n"), NULL);
+	ck_assert_ptr_eq(strstr(output, "|+"), NULL);
+	ck_assert_ptr_eq(strstr(output, "|-"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_block_scalar_strip_chomp_preserved)
+{
+	struct fy_document *fyd;
+	char *output;
+
+	/* literal block with strip chomping: |- */
+	fyd = fy_document_build_from_string(NULL,
+		"key: |-\n  hello\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_DEFAULT);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "|-"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_block_scalar_keep_chomp_preserved)
+{
+	struct fy_document *fyd;
+	char *output;
+
+	/* literal block with keep chomping: |+ */
+	fyd = fy_document_build_from_string(NULL,
+		"key: |+\n  hello\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_DEFAULT);
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "|+"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_comment_preserves_original_indentation)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	char *output;
+
+	/* comment between sequence items at column 2; sequence indent is 0 */
+	fyd = fy_document_build_from_string(&cfg,
+		"- a: b\n  # indented comment\n- c: d\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+	/* the 2-space indent before # must be preserved */
+	ck_assert_ptr_ne(strstr(output, "  # indented comment"), NULL);
+	/* but it must NOT appear at column 0 */
+	ck_assert_ptr_eq(strstr(output, "\n# indented comment"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+/* Helper: emit document via extended config with PRESERVE_FLOW_LAYOUT.
+ * Caller must free() the returned buffer. */
+static char *emit_document_preserve_flow(const char *input)
+{
+	struct fy_parse_cfg pcfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	struct fy_emitter_xcfg xcfg;
+	struct fy_emitter *emit;
+	struct test_emitter_data data;
+	int rc;
+
+	fyd = fy_document_build_from_string(&pcfg, input, FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	memset(&data, 0, sizeof(data));
+	memset(&xcfg, 0, sizeof(xcfg));
+	xcfg.cfg.output = collect_output;
+	xcfg.cfg.userdata = &data;
+	xcfg.cfg.flags = FYECF_MODE_ORIGINAL | FYECF_OUTPUT_COMMENTS |
+			 FYECF_WIDTH_INF | FYECF_EXTENDED_CFG;
+	xcfg.xflags = FYEXCF_PRESERVE_FLOW_LAYOUT;
+
+	emit = fy_emitter_create(&xcfg.cfg);
+	ck_assert_ptr_ne(emit, NULL);
+
+	rc = fy_emit_document(emit, fyd);
+	ck_assert_int_eq(rc, 0);
+
+	fy_emitter_destroy(emit);
+	fy_document_destroy(fyd);
+
+	return data.buf;
+}
+
+START_TEST(emit_original_flow_sequence_oneline)
+{
+	char *output;
+
+	output = emit_document_preserve_flow(
+		"on: [push, pull_request]\n");
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "[push, pull_request]"), NULL);
+
+	free(output);
+}
+END_TEST
+
+START_TEST(emit_original_flow_sequence_with_comment)
+{
+	char *output;
+
+	/* Test that a flow sequence stays oneline even when a sibling key
+	 * has a comment; the inline comment on a scalar is preserved */
+	output = emit_document_preserve_flow(
+		"on: [push, pull_request]\nname: ci # the name\n");
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "[push, pull_request]"), NULL);
+	ck_assert_ptr_ne(strstr(output, "# the name"), NULL);
+
+	free(output);
+}
+END_TEST
+
+START_TEST(emit_original_flow_mapping_oneline)
+{
+	char *output;
+
+	output = emit_document_preserve_flow(
+		"env: {FOO: bar, BAZ: qux}\n");
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "{FOO: bar, BAZ: qux}"), NULL);
+
+	free(output);
+}
+END_TEST
+
+START_TEST(emit_original_empty_flow)
+{
+	char *output;
+
+	output = emit_document_preserve_flow(
+		"empty_seq: []\nempty_map: {}\n");
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "[]"), NULL);
+	ck_assert_ptr_ne(strstr(output, "{}"), NULL);
+
+	free(output);
+}
+END_TEST
+
+START_TEST(emit_original_nested_flow)
+{
+	char *output;
+
+	output = emit_document_preserve_flow(
+		"matrix: [[1, 2], [3, 4]]\n");
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "[[1, 2], [3, 4]]"), NULL);
+
+	free(output);
+}
+END_TEST
+
+START_TEST(emit_original_multiline_flow_stays_multiline)
+{
+	char *output;
+
+	/* A flow sequence that spans two lines in the source */
+	output = emit_document_preserve_flow(
+		"items: [alpha,\n  beta]\n");
+	ck_assert_ptr_ne(output, NULL);
+
+	/* It should NOT be collapsed to a single line */
+	ck_assert_ptr_eq(strstr(output, "[alpha, beta]"), NULL);
+
+	free(output);
+}
+END_TEST
+
+/* Helper: streaming parse→emit round-trip with PRESERVE_FLOW_LAYOUT.
+ * Caller must free() the returned buffer. */
+static char *streaming_roundtrip(const char *input)
+{
+	struct fy_parse_cfg pcfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_emitter_xcfg xcfg;
+	struct fy_parser *fyp;
+	struct test_emitter_data data;
+	struct fy_event *fye;
+	int rc;
+
+	memset(&data, 0, sizeof(data));
+	memset(&xcfg, 0, sizeof(xcfg));
+	xcfg.cfg.output = collect_output;
+	xcfg.cfg.userdata = &data;
+	xcfg.cfg.flags = FYECF_MODE_ORIGINAL | FYECF_OUTPUT_COMMENTS |
+			 FYECF_WIDTH_INF | FYECF_EXTENDED_CFG;
+	xcfg.xflags = FYEXCF_PRESERVE_FLOW_LAYOUT;
+
+	data.emit = fy_emitter_create(&xcfg.cfg);
+	ck_assert_ptr_ne(data.emit, NULL);
+
+	fyp = fy_parser_create(&pcfg);
+	ck_assert_ptr_ne(fyp, NULL);
+
+	rc = fy_parser_set_string(fyp, input, FY_NT);
+	ck_assert_int_eq(rc, 0);
+
+	while ((fye = fy_parser_parse(fyp)) != NULL) {
+		rc = fy_emit_event_from_parser(data.emit, fyp, fye);
+		ck_assert_int_eq(rc, 0);
+	}
+
+	fy_parser_destroy(fyp);
+	fy_emitter_destroy(data.emit);
+	data.emit = NULL;
+
+	return data.buf;
+}
+
+START_TEST(emit_streaming_oneline_flow_sequence)
+{
+	char *output;
+
+	output = streaming_roundtrip(
+		"colors: [red, green]\ncount: 3\n");
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "[red, green]"), NULL);
+
+	free(output);
+}
+END_TEST
+
+START_TEST(emit_streaming_oneline_flow_mapping)
+{
+	char *output;
+
+	output = streaming_roundtrip(
+		"settings: {verbose: true}\ncount: 3\n");
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "{verbose: true}"), NULL);
+
+	free(output);
+}
+END_TEST
+
+START_TEST(emit_streaming_multiline_flow_stays_multiline)
+{
+	char *output;
+
+	output = streaming_roundtrip(
+		"items: [alpha,\n  beta]\n");
+	ck_assert_ptr_ne(output, NULL);
+	/* Should NOT be collapsed to a single line */
+	ck_assert_ptr_eq(strstr(output, "[alpha, beta]"), NULL);
+
+	free(output);
+}
+END_TEST
+
+START_TEST(emit_streaming_nested_flow_oneline)
+{
+	char *output;
+
+	output = streaming_roundtrip(
+		"x: [[1, 2], [3, 4]]\n");
+	ck_assert_ptr_ne(output, NULL);
+	ck_assert_ptr_ne(strstr(output, "[[1, 2], [3, 4]]"), NULL);
+
+	free(output);
+}
+END_TEST
+
+START_TEST(emit_subtree_comment_indent)
+{
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PARSE_COMMENTS };
+	struct fy_document *fyd;
+	struct fy_node *root, *inner;
+	char *output;
+
+	/* Parse: comment at col 2 inside nested mapping */
+	fyd = fy_document_build_from_string(&cfg,
+		"outer:\n  a: 1\n  # before b\n  b: 2\n", FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	/* Emit just the inner mapping (the value of "outer") */
+	root = fy_document_root(fyd);
+	ck_assert_ptr_ne(root, NULL);
+	inner = fy_node_by_path(root, "/outer", FY_NT, FYNWF_DONT_FOLLOW);
+	ck_assert_ptr_ne(inner, NULL);
+
+	output = fy_emit_node_to_string(inner, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+
+	/* Comment was at col 2 in source, but now the subtree is emitted
+	 * at root level — comment should be at col 0 (same as keys) */
+	ck_assert_ptr_ne(strstr(output, "# before b"), NULL);
+	ck_assert_ptr_eq(strstr(output, "  # before b"), NULL);  /* NOT indented */
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(emit_constructed_comment_indent)
+{
+	struct fy_document *fyd;
+	struct fy_node *root, *outer_key, *inner_map, *inner_key, *inner_val;
+	struct fy_token *fyt;
+	char *output;
+	int rc;
+
+	/* Build a nested mapping programmatically */
+	fyd = fy_document_create(NULL);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	root = fy_node_create_mapping(fyd);
+	outer_key = fy_node_create_scalar(fyd, "outer", FY_NT);
+	inner_map = fy_node_create_mapping(fyd);
+	inner_key = fy_node_create_scalar(fyd, "key", FY_NT);
+	inner_val = fy_node_create_scalar(fyd, "value", FY_NT);
+
+	rc = fy_node_mapping_append(inner_map, inner_key, inner_val);
+	ck_assert_int_eq(rc, 0);
+	rc = fy_node_mapping_append(root, outer_key, inner_map);
+	ck_assert_int_eq(rc, 0);
+	fy_document_set_root(fyd, root);
+
+	/* Attach constructed comment to inner key */
+	fyt = fy_node_get_scalar_token(inner_key);
+	ck_assert_ptr_ne(fyt, NULL);
+	rc = fy_token_set_comment(fyt, fycp_top, "constructed comment", FY_NT);
+	ck_assert_int_eq(rc, 0);
+
+	output = fy_emit_document_to_string(fyd, FYECF_OUTPUT_COMMENTS);
+	ck_assert_ptr_ne(output, NULL);
+
+	/* Comment should be at scope indent (col 2), not col 0 */
+	ck_assert_ptr_ne(strstr(output, "  # constructed comment"), NULL);
+
+	free(output);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
 void libfyaml_case_emit(struct fy_check_suite *cs)
 {
 	struct fy_check_testcase *ctc;
@@ -450,4 +893,24 @@ void libfyaml_case_emit(struct fy_check_suite *cs)
 	fy_check_testcase_add_test(ctc, emit_indented_seq_in_map_default);
 	fy_check_testcase_add_test(ctc, emit_right_comment_on_flow_sequence_value);
 	fy_check_testcase_add_test(ctc, emit_right_comment_on_flow_mapping_value);
+	fy_check_testcase_add_test(ctc, emit_nested_mapping_top_comment);
+	fy_check_testcase_add_test(ctc, emit_nested_sequence_top_comment);
+	fy_check_testcase_add_test(ctc, emit_deeply_nested_top_comment);
+	fy_check_testcase_add_test(ctc, emit_root_top_comment_still_works);
+	fy_check_testcase_add_test(ctc, emit_block_scalar_clip_chomp_preserved);
+	fy_check_testcase_add_test(ctc, emit_block_scalar_strip_chomp_preserved);
+	fy_check_testcase_add_test(ctc, emit_block_scalar_keep_chomp_preserved);
+	fy_check_testcase_add_test(ctc, emit_comment_preserves_original_indentation);
+	fy_check_testcase_add_test(ctc, emit_original_flow_sequence_oneline);
+	fy_check_testcase_add_test(ctc, emit_original_flow_sequence_with_comment);
+	fy_check_testcase_add_test(ctc, emit_original_flow_mapping_oneline);
+	fy_check_testcase_add_test(ctc, emit_original_empty_flow);
+	fy_check_testcase_add_test(ctc, emit_original_nested_flow);
+	fy_check_testcase_add_test(ctc, emit_original_multiline_flow_stays_multiline);
+	fy_check_testcase_add_test(ctc, emit_streaming_oneline_flow_sequence);
+	fy_check_testcase_add_test(ctc, emit_streaming_oneline_flow_mapping);
+	fy_check_testcase_add_test(ctc, emit_streaming_multiline_flow_stays_multiline);
+	fy_check_testcase_add_test(ctc, emit_streaming_nested_flow_oneline);
+	fy_check_testcase_add_test(ctc, emit_subtree_comment_indent);
+	fy_check_testcase_add_test(ctc, emit_constructed_comment_indent);
 }

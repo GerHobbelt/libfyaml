@@ -50,6 +50,9 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/MSVCCrossCompile.cmake OPTIONAL)
 
 project(libfyaml LANGUAGES C ASM VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH})
 
+# Export compile commands by default for clangd LSP support
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Must use GNUInstallDirs to install libraries into correct locations on all platforms
 include(GNUInstallDirs)
 include(CheckIncludeFile)
@@ -572,7 +575,7 @@ endif()
 
 set(ASAN_C_FLAGS)
 if(HAVE_ASAN)
-  set(ASAN_C_FLAGS "-fsanitize=address" "-fno-omit-frame-pointer")
+  set(ASAN_C_FLAGS "-fsanitize=address,signed-integer-overflow,undefined" "-fno-omit-frame-pointer")
 endif()
 
 # Build common compiler flags for all targets
@@ -968,7 +971,7 @@ endif()
 add_libclang_to_target(fyaml_static INTERFACE)
 
 # check if blocks are available, and if so link them
-include(${CMAKE_SOURCE_DIR}/cmake/CheckClangBlocks.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckClangBlocks.cmake)
 
 # Apply flags if available
 if (HAVE_CLANG_BLOCKS)
@@ -1282,6 +1285,8 @@ if(CAN_TEST)
             test/libfyaml-test-core.c
             test/libfyaml-test-meta.c
             test/libfyaml-test-emit.c
+            test/libfyaml-test-emit-bugs.c
+            test/libfyaml-test-parse-bugs.c
             test/libfyaml-test-allocator.c
             test/libfyaml-test-fuzzing.c
             test/libfyaml-test-private.c

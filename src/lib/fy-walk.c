@@ -2204,7 +2204,7 @@ int push_operand_lr(struct fy_path_parser *fypp,
 {
 	struct fy_reader *fyr;
 	struct fy_path_expr *expr = NULL, *exprt;
-	const struct fy_mark *ms = NULL, *me = NULL;
+	const struct fy_mark *ms = NULL, *me = NULL, *mtmp;
 	struct fy_atom handle;
 	int ret;
 
@@ -2235,6 +2235,13 @@ int push_operand_lr(struct fy_path_parser *fypp,
 	me = fy_token_end_mark(exprr ? exprr->fyt : exprl->fyt);
 	if (!me)
 		goto err_out;
+
+	/* yes, it might be switched */
+	if (ms->input_pos > me->input_pos) {
+		mtmp = ms;
+		ms = me;
+		me = mtmp;
+	}
 
 	memset(&handle, 0, sizeof(handle));
 	handle.start_mark = *ms;
@@ -2577,6 +2584,7 @@ common_builtin_ref_exec(const struct fy_method *fym,
 
 out:
 	fy_walk_result_free(input);
+	input = NULL;
 	if (args) {
 		for (i = 0; i < nargs; i++)
 			fy_walk_result_free(args[i]);
@@ -2586,6 +2594,7 @@ err_out:
 	if (errorp)
 		*errorp = true;
 	fy_walk_result_free(output);
+	output = NULL;
 	goto out;
 }
 
@@ -4631,47 +4640,6 @@ err_out:
 	goto out;
 }
 
-enum fy_walk_result_set_op {
-	FYWRSO_SELECT,
-	FYWRSO_UNSELECT,
-};
-
-static void fy_node_delete_non_marked(struct fy_node *fyn)
-{
-	struct fy_node *fyni, *fynin;
-	struct fy_node_pair *fynp, *fynpn;
-
-	if (!fyn)
-		return;
-
-	if (!(fyn->marks & FY_BIT(FYNWF_INSET_MARKER))) {
-		fy_node_delete(fyn);
-		return;
-	}
-
-	switch (fyn->type) {
-	case FYNT_SCALAR:
-		break;
-
-	case FYNT_SEQUENCE:
-		for (fyni = fy_node_list_head(&fyn->sequence); fyni; fyni = fynin) {
-			fynin = fy_node_next(&fyn->sequence, fyni);
-
-			fy_node_delete_non_marked(fyni);
-		}
-		break;
-
-	case FYNT_MAPPING:
-		for (fynp = fy_node_pair_list_head(&fyn->mapping); fynp; fynp = fynpn) {
-			fynpn = fy_node_pair_next(&fyn->mapping, fynp);
-
-			/* the mark is on the value */
-			fy_node_delete_non_marked(fynp->value);
-		}
-		break;
-	}
-}
-
 struct fy_walk_result *
 fy_path_expr_execute(struct fy_path_exec *fypx, int level, struct fy_path_expr *expr,
 		     struct fy_walk_result *input, enum fy_path_expr_type ptype,
@@ -5114,19 +5082,23 @@ fy_path_expr_execute(struct fy_path_exec *fypx, int level, struct fy_path_expr *
 
 		exprt = fy_scalar_walk_result_to_expr(fypx, output, ptype, &error);
 		output = NULL;	/* consumed by fy_scalar_walk_result_to_expr() */
-		if (error)
+		if (error) {
+			fy_path_expr_free(exprt);
+			exprt = NULL;
 			goto err_out;
+		}
 
 		if (!exprt)
 			break;
 
 		output = fy_path_expr_execute(fypx, level + 1, exprt, input, ptype, &error);
 		input = NULL;
+		fy_path_expr_free(exprt);
+		exprt = NULL;
+
 		if (error)
 			goto err_out;
 
-		fy_path_expr_free(exprt);
-		exprt = NULL;
 		break;
 
 	case fpet_path_expr:

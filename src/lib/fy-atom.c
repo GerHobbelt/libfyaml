@@ -313,7 +313,7 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 	s = line_start;
 	e = line_start + len;
 
-	is_block = atom->style == FYAS_LITERAL || atom->style == FYAS_FOLDED;
+	is_block = fy_atom_style_is_block(atom->style);
 
 	/* short circuit non multiline, non ws atoms */
 	if ((atom->direct_output && !atom->has_lb && !atom->has_ws) ||
@@ -451,7 +451,7 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 			fprintf(stderr, "%s:%d tab col=%d chomp=%d\n", __FILE__, __LINE__, col, (int)(li->chomp_start - li->start));
 #endif
 
-			if (fy_atom_style_is_block(atom->style) && col >= (int)(li->chomp_start - li->start)) {
+			if (fy_atom_style_is_block(atom->style) && li->chomp_start && col >= (int)(li->chomp_start - li->start)) {
 #if defined(DEBUG_CHUNK)
 				fprintf(stderr, "%s:%d tab col=%d chomp=%d\n", __FILE__, __LINE__, col, (int)(li->chomp_start - li->start));
 #endif
@@ -730,7 +730,7 @@ fy_atom_iter_line(struct fy_atom_iter *iter)
 		nli = NULL;
 
 	/* for quoted, output the white space start */
-	if (atom->style == FYAS_SINGLE_QUOTED || atom->style == FYAS_DOUBLE_QUOTED) {
+	if (fy_atom_style_is_quoted(atom->style)) {
 		li->s = li->first ? li->start : li->nws_start;
 		li->e = li->last ? li->end : li->nws_end;
 
@@ -738,7 +738,7 @@ fy_atom_iter_line(struct fy_atom_iter *iter)
 		if (li->empty && li->first && li->last && !iter->single_line)
 			li->s = li->e;
 
-	} else if (atom->style == FYAS_LITERAL || atom->style == FYAS_FOLDED) {
+	} else if (fy_atom_style_is_block(atom->style)) {
 		li->s = li->chomp_start;
 		li->e = li->end;
 		if (li->empty && li->first && li->last)
@@ -763,11 +763,6 @@ fy_atom_iter_line(struct fy_atom_iter *iter)
 #endif
 	if (li->need_nl)
 		return li;
-
-	if (atom->style & FYAS_MANUAL_MARK) {
-		li->need_nl = false;
-		li->need_sep = false;
-	}
 
 	switch (atom->style) {
 	case FYAS_PLAIN:
@@ -814,7 +809,37 @@ fy_atom_iter_line(struct fy_atom_iter *iter)
 			break;
 		li->need_sep = nli && !nli->indented && !nli->empty;
 		break;
+
+	case FYAS_PLAIN_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
+	case FYAS_SINGLE_QUOTED_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
+	case FYAS_DOUBLE_QUOTED_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
+	case FYAS_LITERAL_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
+	case FYAS_FOLDED_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
 	default:
+		if (atom->style & FYAS_MANUAL_MARK) {
+			li->need_nl = false;
+			li->need_sep = false;
+		}
 		break;
 	}
 
@@ -879,11 +904,11 @@ fy_atom_iter_format(struct fy_atom_iter *iter)
 
 			s = t;
 			/* next character single quote too */
-			if ((e - s) >= 2 && s[1] == '\'')
+			if ((e - s) >= 2 && s[1] == '\'') {
 				fy_atom_iter_add_chunk(iter, s, 1);
-
-			/* skip over this single quote char */
-			s++;
+				s += 2;	/* skip over the two single quotes */
+			} else
+				s++;	/* skip over this single quote char */
 		}
 		break;
 
@@ -959,10 +984,12 @@ fy_atom_iter_format(struct fy_atom_iter *iter)
 	case FYAS_LITERAL_MANUAL:
 	case FYAS_FOLDED_MANUAL:
 		/* manual scalar just goes out */
-		ret = fy_atom_iter_add_chunk(iter, s, e - s);
-		if (ret)
-			goto out;
-		s = e;
+		if (s < e) {
+			ret = fy_atom_iter_add_chunk(iter, s, e - s);
+			if (ret)
+				goto out;
+			s = e;
+		}
 		break;
 
 	default:
@@ -1223,9 +1250,11 @@ const char *fy_atom_format_text(struct fy_atom *atom, char *buf, size_t maxsz)
 	fy_atom_iter_start(atom, &iter);
 	ic = NULL;
 	while ((ic = fy_atom_iter_chunk_next(&iter, ic, &ret)) != NULL) {
-		/* must fit */
-		if ((size_t)(e - s) < ic->len)
-			return NULL;
+		/* must fit (something is really off) */
+		if ((size_t)(e - s) < ic->len) {
+			ret = -1;
+			break;
+		}
 		memcpy(s, ic->str, ic->len);
 		s += ic->len;
 	}
@@ -2077,11 +2106,17 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 				   FYTTAF_ALL_PRINT_ASCII);
 			flags |= FYTTAF_CAN_BE_DOUBLE_QUOTED;
 			flags &= ~FYTTAF_EMPTY;
+			flags |= FYTTAF_HAS_ZERO;
 		} else if (fy_is_ws(c)) {
 
 			flags |= FYTTAF_HAS_WS;
-			if (fy_is_ws(cn))
+			if (fy_is_ws(cn)) {
 				flags |= FYTTAF_HAS_CONSECUTIVE_WS;
+
+				/* on a manual ' style we can't have linebreak and then consecutive ws */
+				if (style == FYAS_SINGLE_QUOTED_MANUAL && fy_atom_is_lb(handle, cp))
+					flags &= ~FYTTAF_CAN_BE_SINGLE_QUOTED;
+			}
 
 			/* non printable ascii */
 			flags &= ~FYTTAF_ALL_PRINT_ASCII;
@@ -2102,6 +2137,8 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 			/* anything with linebreaks, can't be direct */
 			flags &= ~FYTTAF_DIRECT_OUTPUT;
 
+			if (c != '\n')
+				flags |= FYTTAF_HAS_NON_NL_LB;
 		} else {
 			flags &= ~FYTTAF_EMPTY;
 			flags &= ~FYTTAF_ALL_WS_LB;

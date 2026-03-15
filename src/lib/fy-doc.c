@@ -787,11 +787,8 @@ int fy_node_free(struct fy_node *fyn)
 		fyn->sequence_end = NULL;
 		break;
 	case FYNT_MAPPING:
-		while ((fynp = fy_node_pair_list_pop(&fyn->mapping)) != NULL) {
-			if (fyn->xl)
-				fy_accel_remove(fyn->xl, fynp->key);
+		while ((fynp = fy_node_pair_list_pop(&fyn->mapping)) != NULL)
 			fy_node_pair_detach_and_free(fynp);
-		}
 		fy_token_unref(fyn->mapping_start);
 		fy_token_unref(fyn->mapping_end);
 		fyn->mapping_start = NULL;
@@ -2024,6 +2021,7 @@ struct fy_node *fy_node_copy_internal(struct fy_document *fyd, struct fy_node *f
 			fy_node_pair_list_add_tail(&fyn->mapping, fynpt);
 			if (fyn->xl) {
 				rc = fy_accel_insert(fyn->xl, fynpt->key, fynpt);
+				fynpt = NULL;
 				fyd_error_check(fyd, !rc, err_out,
 						"fy_accel_insert() failed");
 			}
@@ -4301,7 +4299,7 @@ fy_node_by_path_internal(struct fy_node *fyn,
 
 	/* scalar can be only last element in the path (it has no key) */
 	if (fy_node_is_scalar(fyn)) {
-		if (*s)
+		if (s < e && *s)
 			fyn = NULL;	/* not end of the path - fail */
 		goto out;
 	}

@@ -559,7 +559,7 @@ struct fy_token *fy_parse_token_create(struct fy_parser *fyp, enum fy_token_type
 
 size_t fy_token_format_text_length(struct fy_token *fyt)
 {
-	size_t length;
+	ssize_t length;
 
 	if (!fyt)
 		return 0;
@@ -577,7 +577,12 @@ size_t fy_token_format_text_length(struct fy_token *fyt)
 	}
 
 	length = fy_atom_format_text_length(&fyt->handle);
-	return length;
+
+	/* when something is seriously wrong cop out */
+	if (length < 0)
+		return 0;
+
+	return (size_t)length;
 }
 
 const char *fy_token_format_text(struct fy_token *fyt, char *buf, size_t maxsz)
@@ -1557,6 +1562,10 @@ unsigned int fy_analyze_scalar_content(const char *data, size_t size,
 		/* : followed by flow markers can't be a plain in flow context */
 		if ((flags & FYACF_FLOW_PLAIN) &&
 		    (fy_utf8_strchr(",[]{}", c) || (c == ':' && fy_utf8_strchr(",[]{}", nextc))))
+			flags &= ~FYACF_FLOW_PLAIN;
+
+		/* , followed by space can't be a plain in flow context */
+		if ((flags & FYACF_FLOW_PLAIN) && c == ',')
 			flags &= ~FYACF_FLOW_PLAIN;
 
 		if (!(flags & FYACF_JSON_ESCAPE) && !fy_is_json_unescaped(c))
