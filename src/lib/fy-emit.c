@@ -46,7 +46,7 @@ static inline void fy_emit_token_unref(struct fy_emitter *emit, struct fy_parser
 /* fwd decl */
 void fy_emit_write(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, size_t len);
 void fy_emit_printf(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *fmt, ...)
-		__attribute__((format(printf, 3, 4)));
+	FY_FORMAT(printf, 3, 4);
 
 static inline bool fy_emit_is_json_mode(const struct fy_emitter *emit)
 {
@@ -117,6 +117,13 @@ static inline bool fy_emit_is_pretty_mode(const struct fy_emitter *emit)
 	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
 
 	return flags == FYECF_MODE_PRETTY;
+}
+
+static inline bool fy_emit_is_original_mode(const struct fy_emitter *emit)
+{
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
+
+	return flags == FYECF_MODE_ORIGINAL;
 }
 
 static inline bool fy_emit_is_manual(const struct fy_emitter *emit)
@@ -639,8 +646,7 @@ void fy_emit_token_comment(struct fy_emitter *emit, struct fy_token *fyt, int fl
 	if (placement == fycp_top || placement == fycp_bottom) {
 		int comment_indent = indent > 0 ? indent : 0;
 		if (handle && indent >= 0) {
-			struct fy_token_comment *tc = container_of(handle, struct fy_token_comment, handle);
-			comment_indent = indent + tc->indent_delta;
+			comment_indent = indent + handle->indent_delta;
 			if (comment_indent < 0)
 				comment_indent = 0;
 		}
@@ -1293,6 +1299,68 @@ out:
 	emit->flags &= ~FYEF_INDENTATION;
 }
 
+static inline bool fy_emit_can_use_original_folded_breaks(struct fy_emitter *emit,
+                                                          struct fy_atom *atom)
+{
+	return fy_emit_is_original_mode(emit) && atom->fyi &&
+	       atom->chomp_explicit &&
+	       (atom->style & ~FYAS_MANUAL_MARK) == FYAS_FOLDED;
+}
+
+static void fy_emit_token_write_folded_original(struct fy_emitter *emit,
+                                                struct fy_token *fyt, struct fy_atom *atom, int indent)
+{
+	struct fy_atom_raw_line_iter rliter;
+	const struct fy_raw_line *rl;
+	int w;
+
+	fy_atom_raw_line_iter_start(atom, &rliter);
+	fy_emit_accum_start(&emit->ea, emit->column, fy_token_atom_lb_mode(fyt));
+
+	const unsigned int orig_indent = atom->increment;
+
+	while ((rl = fy_atom_raw_line_iter_next(&rliter)) != NULL) {
+
+		if (rl->content_len == 0) {
+			/* blank line: emit newline only */
+			fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+			emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
+			continue;
+		}
+
+		/* content line: write indent, content, then newline */
+		fy_emit_write_indent(emit, indent);
+		fy_emit_output_col_sync(emit, &emit->ea);
+
+		const char *s = rl->content_start;
+		const char *e = s + rl->content_len;
+
+		/* skip the block scalar's base indentation */
+		{
+			unsigned int skip = orig_indent;
+			while (skip > 0 && s < e &&
+			       (!atom->tabsize ? (*s == ' ') : fy_utf8_is_ws((unsigned char)*s))) {
+				s++;
+				skip--;
+			}
+		}
+
+		while (s < e) {
+			const int c = fy_utf8_get(s, (size_t) (e - s), &w);
+			if (c <= 0)
+				break;
+			fy_emit_accum_utf8_put(&emit->ea, c);
+			s += w;
+		}
+		fy_emit_output_accum(emit, fyewt_folded_scalar, &emit->ea);
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
+	}
+
+	fy_emit_accum_finish(&emit->ea);
+	fy_atom_raw_line_iter_finish(&rliter);
+}
+
 void fy_emit_token_write_folded(struct fy_emitter *emit, struct fy_token *fyt, int flags, int indent)
 {
 	bool leading_spaces, breaks;
@@ -1313,6 +1381,13 @@ void fy_emit_token_write_folded(struct fy_emitter *emit, struct fy_token *fyt, i
 	atom = fy_token_atom(fyt);
 	if (!atom)
 		return;
+
+	/* in original mode with a parsed-as-folded atom, preserve original line breaks;
+	 * chomp_explicit distinguishes parsed block scalars from event-created atoms */
+	if (fy_emit_can_use_original_folded_breaks(emit, atom)) {
+		fy_emit_token_write_folded_original(emit, fyt, atom, indent);
+		return;
+	}
 
 	breaks = true;
 	leading_spaces = true;
@@ -2055,9 +2130,6 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 		fy_emit_mapping_value_epilog(emit, sc, last, fyt_value);
 	}
 
-	if (fynpp && used_malloc)
-		free(fynpp);
-
 	fy_emit_mapping_epilog(emit, sc);
 
 	/* emit right-comment attached to the closing brace token */
@@ -2065,6 +2137,8 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 		fy_emit_token_comment(emit, fyn->mapping_end, sc->flags, sc->indent, fycp_right);
 
 err_out:
+	if (fynpp && used_malloc)
+		free(fynpp);
 	return;
 }
 
@@ -2885,6 +2959,9 @@ out_err:
 int fy_emit_document_to_buffer(struct fy_document *fyd, enum fy_emitter_cfg_flags flags, char *buf, size_t size)
 {
 	int rc;
+
+	if (!buf)
+		return -1;
 
 	rc = fy_emit_str_internal(fyd, flags, NULL, &buf, &size, false);
 	if (rc != 0)

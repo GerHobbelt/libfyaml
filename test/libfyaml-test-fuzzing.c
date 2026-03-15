@@ -883,6 +883,247 @@ START_TEST(fuzz_resolve_recursive_ypath_dup_keys_emit_fp)
 }
 END_TEST
 
+START_TEST(fuzz_node_get_type_uaf)
+{
+	char data[] =
+		"\x0a\x20\x2d\x20\x2a\x2f\x2e\x2e\x2a\x0a"
+		"\x20\x2d\x20\x2a\x2f\x2a\x2a\x21\x0a"
+		"\x20\x2d\x20\x2a\x2f\x2a\x2a\x2f";
+
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd = NULL;
+
+	cfg.flags = FYPCF_RESOLVE_DOCUMENT | FYPCF_PREFER_RECURSIVE |
+		    FYPCF_YPATH_ALIASES;
+
+	// this must fail
+	fyd = fy_document_build_from_string(&cfg, data, FY_NT);
+	ck_assert_ptr_eq(fyd, NULL);
+}
+END_TEST
+
+START_TEST(fuzz_emit_node_to_string_uaf)
+{
+	char buf[] =
+		"\x2a\x2f\x2a\x5e\x2f\x09\x09\x3a\x0a\x2a\x2f\x5e\x09\x3a\x0a"
+		"\x2a\x2f\x2a\x2f\x09\x3a\x0a\x5e\x2a\x09\x3a\x0a\x2a\x2f\x5e";
+
+	struct fy_parse_cfg cfg = {0};
+	struct fy_document *fyd = NULL;
+
+	cfg.flags = FYPCF_RESOLVE_DOCUMENT | FYPCF_DISABLE_ACCELERATORS |
+		    FYPCF_SLOPPY_FLOW_INDENTATION | FYPCF_PREFER_RECURSIVE |
+		    FYPCF_YPATH_ALIASES;
+
+	// this must fail
+	fyd = fy_document_build_from_string(&cfg, buf, FY_NT);
+	ck_assert_ptr_eq(fyd, NULL);
+}
+END_TEST
+
+START_TEST(fuzz_document_iterator_cleanup_uaf)
+{
+	/* Data from the issue report that triggers the merge-key path */
+	char data[] =
+		"\x0a\x25\x59\x41\x4d\x4c\x09\x31\x2e\x31\x0d\x2d\x2d\x2d\xe2\x80"
+		"\xa8\x74\x74\x74\x74\x74\x74\x74\x74\x74\x74\x74\x74\x74\x74\x20"
+		"\x20\x20\x20\x1a\x3a\x2d\x2d\x25\x20\x2d\x20\x22\x3a\x0d\x2d\x20"
+		"\x3a\x2d\x2d\x20\x2d\x20\x2a\x2f\x5a\x0d\x3c\x3c\x3a\x0d\x2d\x20"
+		"\x20\x20\x3a\x20\x20\x2d\x54\x41\x47\x2f\x3a\x0d\x3a\x20\x74\x74"
+		"\x74\x74\x74\x74\x74\x74\x74\x74\x74\x74\x74\x3a\x20\x3a\x20\x3a"
+		"\x09\x32\x2e\x31\x0d\x2d\x2d\x2d\xe2\x80\xa8\x74\x2d\x20\x2d\x20"
+		"\x2a\x2f\x3a\x0d\x3c\x3c\x3a\x0d\x2d\x20\x20\x7b\x7d\x20\x69\x2a"
+		"\x21\x7b\x7b\x7d\x7a\x5d\x42\x7b\x7d\x7b\x35\x0a\x74\x74\x74\x74"
+		"\x74\x74\x74\x74\x74\x74\x74\x74\x74\x3a\x20\x3a\x20\x3a\x20\x3a"
+		"\x20\x3a\x20\x3a\x20\x6d\x20\x43\x20\x74\x74\x74\x74\x74\x74\x74"
+		"\x74\x74\x74\x74\x74\x74\x3a\x20\x3a\x20\x3a\x09\x32\x2e\x31\x0d"
+		"\x2d\x2d\x2d\xe2\x80\xa8\x74\x2d\x20\x2d\x20\x2a\x2f\x3a\x0d\x3c"
+		"\x3c\x3a\x0d\x2d\x20\x20\x74\x74\x74\x74\x74\x74\x74\x74\x74\x74"
+		"\x74\x74\x74\x3a\x20\x3a\x20\x3a\x20\x3a\x20\x3a\x20\x3a\x20\x6d"
+		"\x20\x43\x20\x3a\x20\x3a\x20\x2d\x20\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00";
+
+	struct fy_parser *fyp = NULL;
+	struct fy_parse_cfg cfg = {0};
+	struct fy_event *fyev = NULL;
+	int rc;
+
+	cfg.flags = FYPCF_RESOLVE_DOCUMENT | FYPCF_PARSE_COMMENTS |
+		    FYPCF_DISABLE_BUFFERING | FYPCF_SLOPPY_FLOW_INDENTATION;
+
+	fyp = fy_parser_create(&cfg);
+	ck_assert_ptr_ne(fyp, NULL);
+
+	rc = fy_parser_set_string(fyp, data, FY_NT);
+	ck_assert_int_eq(rc, 0);
+
+	while ((fyev = fy_parser_parse(fyp)) != NULL) {
+		fy_event_get_comments(fyev);
+		fy_parser_event_free(fyp, fyev);
+	}
+
+	fy_parser_destroy(fyp);
+}
+END_TEST
+
+START_TEST(fuzz_emit_mapping_memory_leak)
+{
+	char data[] =
+		"\x3a\x0a\x0a\x77\x7b\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x0a\x7b\x7d\x3a"
+		"\x0a\x3a\x3a\x0a\x0a\x0a\x7b\x7d\x3a\x0a\x3a\x0a\x7b\x7d\x3a\x0a"
+		"\x0a\x7b\x7d\x3a\x0a\x3d\x7b\x7b\x7d\x3a\x0a\x3a\x3a\x0a\x0a\x3a"
+		"\x3a\x0a\x0a\x0a\x7b\x7d\x3a\x0a\x3a\x0a\x4a\x7b\x7d\x3a\x0a\x0a"
+		"\x7b\x7d\x3a\x0a\x0a\x77\x7b\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x0a\x7b"
+		"\x7d\x3a\x0a\x3a\x3a\x0a\x0a\x0a\x7b\x7d\x3a\x0a\x3a\x0a\x7b\x7d"
+		"\x3a\x0a\x0a\x7b\x7d\x3a\x0a\x3d\x7b\x7b\x7d\x3a\x0a\x3a\x3a\x0a"
+		"\x0a\x0a\x7b\x7d\x3a\x0a\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x7b\x7d\x3a"
+		"\x0a\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x7b\x7d\x3a\x0a\x0a\x77\x7b\x3a"
+		"\x0a\x7b\x7d\x3a\x0a\x0a\x0a\x7b\x7d\x3a\x0a\x3a\x3a\x0a\x0a\x0a"
+		"\x7b\x7d\x3a\x0a\x3a\x0a\x7b\x7d\x3a\x0a\x3a\x0a\x7b\x7d\x3a\x0a"
+		"\x0a\x7b\x7d\x3a\x0a\x0a\x77\x7b\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x0a"
+		"\x7b\x7d\x3a\x0a\x3a\x3a\x0a\x0a\x0a\x7b\x7d\x3a\x0a\x3a\x0a\x7b"
+		"\x7d\x3a\x0a\x0a\x7b\x7d\x3a\x0a\x3d\x7b\x7b\x7d\x3a\x0a\x3a\x3a"
+		"\x0a\x0a\x0a\x7b\x7d\x3a\x0a\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x7b\x7d"
+		"\x3a\x0a\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x7b\x7d\x3a\x0a\x0a\x77\x7b"
+		"\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x0a\x7b\x7d\x3a\x0a\x3a\x3a\x0a\x0a"
+		"\x0a\x7b\x7d\x3a\x0a\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x7b\x7d\x3a\x0a"
+		"\x2d\x2d\x2d\x7b\x7d\x3a\x0a\x3d\x7b\x7b\x7d\x3a\x0a\x3a\x3a\x0a"
+		"\x0a\x0a\x7b\x7d\x3a\x0a\x3a\x0a\x7b\x7d\x3a\x0a\x0a\x7b\x7d\x3a"
+		"\x0a\x3d\x7b\x7d\x3a\x0a\x3f";
+
+	struct fy_parse_cfg cfg = {
+		.flags = FYPCF_YPATH_ALIASES | FYPCF_ALLOW_DUPLICATE_KEYS
+	};
+	struct fy_document *fyd;
+	char *result;
+
+	fyd = fy_document_build_from_string(&cfg, data, FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	result = fy_emit_document_to_string(fyd, FYECF_SORT_KEYS | FYECF_MODE_JSON_TP);
+	ck_assert_ptr_ne(result, NULL);
+	free(result);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(fuzz_walk_number_to_expr_nonfinite)
+{
+	char data[] = "\x2a\x28\x6e\x2a\x28\x2d\x30\x2f\x30\x29\x2f\x2a\x2a";
+	struct fy_parse_cfg cfg = {
+		.flags = FYPCF_COLLECT_DIAG | FYPCF_RESOLVE_DOCUMENT |
+			 FYPCF_PREFER_RECURSIVE | FYPCF_JSON_NONE |
+			 FYPCF_YPATH_ALIASES,
+	};
+	struct fy_document *fyd = NULL;
+	FILE *fp = NULL;
+	int rc;
+
+	fyd = fy_document_build_from_string(&cfg, data, FY_NT);
+	if (!fyd)
+		return;
+
+	fp = fopen("/dev/null", "w");
+	ck_assert_ptr_ne(fp, NULL);
+
+	rc = fy_emit_document_to_fp(fyd,
+		FYECF_STRIP_LABELS | FYECF_WIDTH_DEFAULT | FYECF_WIDTH_80 |
+		FYECF_WIDTH_INF | FYECF_MODE_FLOW | FYECF_MODE_FLOW_ONELINE |
+		FYECF_MODE_JSON | FYECF_MODE_JSON_TP | FYECF_MODE_JSON_ONELINE |
+		FYECF_MODE_DEJSON | FYECF_MODE_FLOW_COMPACT |
+		FYECF_MODE_JSON_COMPACT | FYECF_DOC_START_MARK_OFF,
+		fp);
+	(void)rc;
+
+	fclose(fp);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(fuzz_path_expr_execute_oom)
+{
+	char data[] =
+		"\x2f\x2f\x2c\x2e\x2f\x2f\x2f\x2f\x2e\x2c\x2e\x2f\x2e\x2c\x2e\x2f"
+		"\x2f\x2f\x2f\x2e\x2c\x33\x3a\x32\x2c\x2e\x2f\x2f\x2e\x2c\x2e\x2f"
+		"\x2f\x2e\x2c\x2e\x2c\x2e\x31\x2f\x2f\x2f\x2e\x2c\x2e\x2f\x2f\x2f"
+		"\x2f\x2e\x2c\x33\x3a\x32\x2c\x2f\x2e\x2c\x2e\x2f\x2e\x2c\x2e\x2f"
+		"\x2f\x2f\x2f\x2e\x2c\x33\x3a\x32\x2c\x2e\x2f\x2f\x2e\x2c\x2e\x2f"
+		"\x2f\x2e\x2c\x2e\x2c\x2e\x31\x2f\x2f\x2f\x2e\x2c\x2e\x2f\x2f\x2f"
+		"\x2f\x2e\x2c\x33\x3a\x32\x2c\x2e\x2f\x2f\x2e\x2c\x2e\x2f\x2f\x2e"
+		"\x2c\x2e\x2c\x2e\x31\x2f\x2f\x2e\x2c\x2e\x2f\x2e\x2c\x2e\x2f\x2e"
+		"\x2c\x2e\x2f\x2f\x2e\x2c\x2e\x2f\x2f\x2e\x2c\x2e\x2c\x2e\x31\x2f"
+		"\x2f\x2e\x2c\x2e\x2f\x2e\x2c\x2e\x2f\x2e\x2c\x2e\x2c\x2e\x2f\x2a";
+	struct fy_document *fyd = NULL;
+	struct fy_node *fyn, *root, *node;
+
+	fyd = fy_document_create(NULL);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	fyn = fy_node_create_sequence(fyd);
+	ck_assert_ptr_ne(fyn, NULL);
+	fy_document_set_root(fyd, fyn);
+
+	root = fy_document_root(fyd);
+	ck_assert_ptr_ne(root, NULL);
+
+	node = fy_node_by_path(root, data, FY_NT,
+			FYNWF_FOLLOW | FYNWF_PTR_JSON |
+			FYNWF_PTR_RELJSON | FYNWF_PTR_YPATH);
+	(void)node;
+
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(fuzz_anchor_accel_cleanup_scalar_borrowed_input)
+{
+	char *doc_str;
+	struct fy_document *fyd = NULL;
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PREFER_RECURSIVE | FYPCF_JSON_NONE };
+
+	doc_str = strdup("&a foo");
+	ck_assert_ptr_ne(doc_str, NULL);
+
+	fyd = fy_document_build_from_string(&cfg, doc_str, FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	free(doc_str);
+	fy_document_destroy(fyd);
+}
+END_TEST
+
+START_TEST(fuzz_anchor_accel_cleanup_mapping_borrowed_input)
+{
+	char *doc_str;
+	struct fy_document *fyd = NULL;
+	struct fy_node *removed_val = NULL;
+	struct fy_parse_cfg cfg = { .flags = FYPCF_PREFER_RECURSIVE | FYPCF_JSON_NONE };
+	struct fy_node *root, *key_node;
+
+	doc_str = strdup("{ &a foo: bar }");
+	ck_assert_ptr_ne(doc_str, NULL);
+
+	fyd = fy_document_build_from_string(&cfg, doc_str, FY_NT);
+	ck_assert_ptr_ne(fyd, NULL);
+
+	root = fy_document_root(fyd);
+	ck_assert_ptr_ne(root, NULL);
+	ck_assert(fy_node_is_mapping(root));
+
+	key_node = fy_node_build_from_string(fyd, "foo", FY_NT);
+	ck_assert_ptr_ne(key_node, NULL);
+	removed_val = fy_node_mapping_remove_by_key(root, key_node);
+	fy_node_free(key_node);
+
+	fy_node_free(removed_val);
+	free(doc_str);
+	fy_document_destroy(fyd);
+}
+END_TEST
 
 void libfyaml_case_fuzzing(struct fy_check_suite *cs)
 {
@@ -944,4 +1185,12 @@ void libfyaml_case_fuzzing(struct fy_check_suite *cs)
 	fy_check_testcase_add_test(ctc, fuzz_build_from_fp_sloppy_recursive_ypath_aliases);
 	fy_check_testcase_add_test(ctc, fuzz_build_from_fp_ypath_aliases_recursive);
 #endif
+	fy_check_testcase_add_test(ctc, fuzz_node_get_type_uaf);
+	fy_check_testcase_add_test(ctc, fuzz_emit_node_to_string_uaf);
+	fy_check_testcase_add_test(ctc, fuzz_document_iterator_cleanup_uaf);
+	fy_check_testcase_add_test(ctc, fuzz_emit_mapping_memory_leak);
+	fy_check_testcase_add_test(ctc, fuzz_walk_number_to_expr_nonfinite);
+	fy_check_testcase_add_test(ctc, fuzz_path_expr_execute_oom);
+	fy_check_testcase_add_test(ctc, fuzz_anchor_accel_cleanup_scalar_borrowed_input);
+	fy_check_testcase_add_test(ctc, fuzz_anchor_accel_cleanup_mapping_borrowed_input);
 }

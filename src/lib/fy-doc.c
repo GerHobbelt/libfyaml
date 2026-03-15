@@ -150,18 +150,19 @@ static int fy_document_set_anchor_internal(struct fy_document *fyd, struct fy_no
 
 	if (!text) {
 		/* no anchor, and trying to delete? OK */
-		if (fya)
+		if (!fya)
 			return 0;
+
 		/* remove the anchor */
 		fy_anchor_list_del(&fyd->anchors, fya);
 
-		if (fy_document_is_accelerated(fyd)) {
-			xle = fy_accel_entry_lookup_key_value(fyd->axl, fya->anchor, fya);
-			fy_accel_entry_remove(fyd->axl, xle);
+			if (fy_document_is_accelerated(fyd)) {
+				xle = fy_accel_entry_lookup_value(fyd->axl, fya);
+				fy_accel_entry_remove(fyd->axl, xle);
 
-			xle = fy_accel_entry_lookup_key_value(fyd->naxl, fya->fyn, fya);
-			fy_accel_entry_remove(fyd->naxl, xle);
-		}
+				xle = fy_accel_entry_lookup_value(fyd->naxl, fya);
+				fy_accel_entry_remove(fyd->naxl, xle);
+			}
 
 		fy_anchor_destroy(fya);
 		return 0;
@@ -748,10 +749,10 @@ int fy_node_free(struct fy_node *fyn)
 
 			fy_anchor_list_del(&fyd->anchors, fya);
 
-			xle = fy_accel_entry_lookup_key_value(fyd->axl, fya->anchor, fya);
+			xle = fy_accel_entry_lookup_value(fyd->axl, fya);
 			fy_accel_entry_remove(fyd->axl, xle);
 
-			xle = fy_accel_entry_lookup_key_value(fyd->naxl, fya->fyn, fya);
+			xle = fy_accel_entry_lookup_value(fyd->naxl, fya);
 			fy_accel_entry_remove(fyd->naxl, xle);
 
 			fy_anchor_destroy(fya);
@@ -2009,7 +2010,7 @@ struct fy_node *fy_node_copy_internal(struct fy_document *fyd, struct fy_node *f
 				fyd_error_check(fyd, fynpt->value, err_out,
 						"fy_node_copy_internal() key failed");
 			}
-			fynp->parent = fyn;
+			fynpt->parent = fyn;
 
 			if (fynpt->key) {
 				fynpt->key->attached = true;
@@ -2114,6 +2115,10 @@ int fy_node_copy_to_scalar(struct fy_document *fyd, struct fy_node *fyn_to, stru
 {
 	struct fy_node *fyn, *fyni;
 	struct fy_node_pair *fynp;
+	struct fy_accel_entry_iter xli;
+	struct fy_accel_entry *xle, *xlen;
+	struct fy_anchor_list *fyal;
+	struct fy_anchor *fya;
 
 	fyn = fy_node_copy(fyd, fyn_from);
 	if (!fyn)
@@ -2136,19 +2141,56 @@ int fy_node_copy_to_scalar(struct fy_document *fyd, struct fy_node *fyn_to, stru
 		break;
 	case FYNT_SEQUENCE:
 		fy_node_list_init(&fyn_to->sequence);
-		while ((fyni = fy_node_list_pop(&fyn->sequence)) != NULL)
+		fyn_to->sequence_start = fyn->sequence_start;
+		fyn->sequence_start = NULL;
+		fyn_to->sequence_end = fyn->sequence_end;
+		fyn->sequence_end = NULL;
+		while ((fyni = fy_node_list_pop(&fyn->sequence)) != NULL) {
+			fyni->parent = fyn_to;
 			fy_node_list_add_tail(&fyn_to->sequence, fyni);
+		}
 		break;
 	case FYNT_MAPPING:
 		fy_node_pair_list_init(&fyn_to->mapping);
+		/* fy_node_copy_to_scalar() is only used to replace alias scalars. */
+		assert(!fyn_to->xl);
+		fyn_to->mapping_start = fyn->mapping_start;
+		fyn->mapping_start = NULL;
+		fyn_to->mapping_end = fyn->mapping_end;
+		fyn->mapping_end = NULL;
+		fyn_to->xl = fyn->xl;
+		fyn->xl = NULL;
 		while ((fynp = fy_node_pair_list_pop(&fyn->mapping)) != NULL) {
-			if (fyn->xl)
-				fy_accel_remove(fyn->xl, fynp->key);
+			fynp->parent = fyn_to;
+			if (fynp->key)
+				fynp->key->parent = fyn_to;
+			if (fynp->value)
+				fynp->value->parent = fyn_to;
 			fy_node_pair_list_add_tail(&fyn_to->mapping, fynp);
-			if (fyn_to->xl)
-				fy_accel_insert(fyn_to->xl, fynp->key, fynp);
 		}
 		break;
+	}
+
+	/* update any anchors pointing to the temporary copy (fyn) to now
+	 * point to fyn_to, since we've moved all of fyn's data into fyn_to */
+	if (fy_document_is_accelerated(fyd)) {
+		for (xle = fy_accel_entry_iter_start(&xli, fyd->naxl, fyn);
+		     xle; xle = xlen) {
+			xlen = fy_accel_entry_iter_next(&xli);
+
+			fya = (void *)xle->value;
+			fy_accel_entry_remove(fyd->naxl, xle);
+			fya->fyn = fyn_to;
+			fy_accel_insert(fyd->naxl, fyn_to, fya);
+		}
+		fy_accel_entry_iter_finish(&xli);
+	} else {
+		fyal = &fyd->anchors;
+		for (fya = fy_anchor_list_head(fyal); fya;
+		     fya = fy_anchor_next(fyal, fya)) {
+			if (fya->fyn == fyn)
+				fya->fyn = fyn_to;
+		}
 	}
 
 	/* and free */
@@ -2948,13 +2990,13 @@ void fy_document_purge_anchors(struct fy_document *fyd)
 		fyan = fy_anchor_next(&fyd->anchors, fya);
 		fy_anchor_list_del(&fyd->anchors, fya);
 
-		if (fy_document_is_accelerated(fyd)) {
-			xle = fy_accel_entry_lookup_key_value(fyd->axl, fya->anchor, fya);
-			fy_accel_entry_remove(fyd->axl, xle);
+			if (fy_document_is_accelerated(fyd)) {
+				xle = fy_accel_entry_lookup_value(fyd->axl, fya);
+				fy_accel_entry_remove(fyd->axl, xle);
 
-			xle = fy_accel_entry_lookup_key_value(fyd->naxl, fya->fyn, fya);
-			fy_accel_entry_remove(fyd->naxl, xle);
-		}
+				xle = fy_accel_entry_lookup_value(fyd->naxl, fya);
+				fy_accel_entry_remove(fyd->naxl, xle);
+			}
 
 		fy_anchor_destroy(fya);
 	}
@@ -4502,7 +4544,7 @@ fy_node_by_path_internal(struct fy_node *fyn,
 					continue;
 				}
 				/* unterminated ~ escape, or neither ~0, ~1 */
-				if (ss + 1 >= ee || (ss[1] < '0' && ss[1] > '1'))
+				if (ss + 1 >= ee || (ss[1] != '0' && ss[1] != '1'))
 					return NULL;
 				*t++ = ss[1] == '0' ? '~' : '/';
 				ss += 2;
@@ -5910,9 +5952,6 @@ struct fy_node *fy_node_mapping_remove_by_key(struct fy_node *fyn_map, struct fy
 		fyn_value->attached = false;
 	}
 
-	/* do not free the key if it's the same pointer */
-	if (fyn_key != fynp->key)
-		fy_node_detach_and_free(fyn_key);
 	fynp->value = NULL;
 
 	fy_node_pair_list_del(&fyn_map->mapping, fynp);
@@ -6135,6 +6174,90 @@ int fy_node_mapping_sort(struct fy_node *fyn_map,
 	}
 
 	fy_node_mapping_release_array(fyn_map, fynpp);
+
+	return 0;
+}
+
+static int fy_node_sequence_sort_cmp(
+#ifdef __APPLE__
+void *arg, const void *a, const void *b
+#else
+const void *a, const void *b, void *arg
+#endif
+)
+{
+	struct fy_node_sequence_sort_ctx *ctx = arg;
+	struct fy_node * const *fynpa = a, * const *fynpb = b;
+
+	assert(fynpa >= ctx->fynp && fynpa < ctx->fynp + ctx->count);
+	assert(fynpb >= ctx->fynp && fynpb < ctx->fynp + ctx->count);
+
+	return ctx->cmp(*fynpa, *fynpb, ctx->arg);
+}
+
+/* not! thread safe! */
+#if !defined(HAVE_QSORT_R) || !HAVE_QSORT_R || defined(__EMSCRIPTEN__)
+static struct fy_node_sequence_sort_ctx *fy_node_sequence_sort_ctx_no_qsort_r;
+
+static int fy_node_sequence_sort_cmp_no_qsort_r(const void *a, const void *b)
+{
+#ifdef __APPLE__
+	return fy_node_sequence_sort_cmp(
+			fy_node_sequence_sort_ctx_no_qsort_r,
+			a, b);
+#else
+	return fy_node_sequence_sort_cmp(a, b,
+			fy_node_sequence_sort_ctx_no_qsort_r);
+#endif
+}
+
+#endif
+
+int fy_node_sequence_sort(struct fy_node *fyn_seq,
+		fy_node_sequence_sort_fn cmp, void *arg)
+{
+	struct fy_node_sequence_sort_ctx ctx;
+	struct fy_node **fynp, *fyni;
+	int count, i;
+
+	if (!fyn_seq || fyn_seq->type != FYNT_SEQUENCE || !cmp)
+		return -1;
+
+	count = fy_node_sequence_item_count(fyn_seq);
+	if (count <= 1)
+		return 0;
+
+	fynp = malloc(count * sizeof(*fynp));
+	if (!fynp)
+		return -1;
+
+	for (i = 0, fyni = fy_node_list_head(&fyn_seq->sequence); i < count && fyni;
+		fyni = fy_node_next(&fyn_seq->sequence, fyni), i++)
+		fynp[i] = fyni;
+
+	ctx.cmp = cmp;
+	ctx.arg = arg;
+	ctx.fynp = fynp;
+	ctx.count = count;
+
+#if defined(HAVE_QSORT_R) && HAVE_QSORT_R && !defined(__EMSCRIPTEN__)
+#ifdef __APPLE__
+	qsort_r(fynp, count, sizeof(*fynp), &ctx, fy_node_sequence_sort_cmp);
+#else
+	qsort_r(fynp, count, sizeof(*fynp), fy_node_sequence_sort_cmp, &ctx);
+#endif
+#else
+	/* caution, not thread safe */
+	fy_node_sequence_sort_ctx_no_qsort_r = &ctx;
+	qsort(fynp, count, sizeof(*fynp), fy_node_sequence_sort_cmp_no_qsort_r);
+	fy_node_sequence_sort_ctx_no_qsort_r = NULL;
+#endif
+
+	fy_node_list_init(&fyn_seq->sequence);
+	for (i = 0; i < count; i++)
+		fy_node_list_add_tail(&fyn_seq->sequence, fynp[i]);
+
+	free(fynp);
 
 	return 0;
 }
@@ -6514,6 +6637,8 @@ int fy_node_scanf(struct fy_node *fyn, const char *fmt, ...)
 
 int fy_document_vscanf(struct fy_document *fyd, const char *fmt, va_list ap)
 {
+	if (!fyd)
+		return -1;
 	return fy_node_vscanf(fyd->root, fmt, ap);
 }
 

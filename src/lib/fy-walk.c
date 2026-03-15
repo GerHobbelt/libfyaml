@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <math.h>
 #include <limits.h>
+#include <float.h>
 
 #include <libfyaml.h>
 
@@ -28,6 +29,8 @@
 
 #undef DEBUG_EXPR
 // #define DEBUG_EXPR
+
+#define FY_PATH_EXEC_STEP_LIMIT		4096
 
 /* debugging for when expressions go crazy */
 #ifdef DEBUG_EXPR
@@ -517,6 +520,21 @@ fy_walk_result_flatten(struct fy_walk_result *fwr)
 
 	fwrl = fy_path_exec_walk_result_rl(fwr->fypx);
 	return fy_walk_result_flatten_rl(fwrl, fwr);
+}
+
+static void
+fy_walk_result_refs_add_flattened(struct fy_walk_result *output, struct fy_walk_result *fwr)
+{
+	if (!output || output->type != fwrt_refs || !fwr)
+		return;
+
+	if (fwr->type != fwrt_refs) {
+		fy_walk_result_list_add_tail(&output->refs, fwr);
+		return;
+	}
+
+	fy_walk_result_flatten_internal(fwr, output);
+	fy_walk_result_free(fwr);
 }
 
 struct fy_node *
@@ -4472,7 +4490,7 @@ fy_walk_result_lhs_rhs(struct fy_path_exec *fypx,
 				goto err_out;
 
 			if (outputl)
-				fy_walk_result_list_add_tail(&output->refs, outputl);
+				fy_walk_result_refs_add_flattened(output, outputl);
 			else {
 				fy_walk_result_free(outputl);
 				outputl = NULL;
@@ -4501,7 +4519,7 @@ fy_walk_result_lhs_rhs(struct fy_path_exec *fypx,
 					goto err_out;
 
 				if (outputr)
-					fy_walk_result_list_add_tail(&output->refs, outputr);
+					fy_walk_result_refs_add_flattened(output, outputr);
 				else {
 					fy_walk_result_free(outputr);
 					outputr = NULL;
@@ -4534,7 +4552,7 @@ fy_walk_result_lhs_rhs(struct fy_path_exec *fypx,
 				FY_IMPOSSIBLE_ABORT();
 
 			if (fwr)
-				fy_walk_result_list_add_tail(&output->refs, fwr);
+				fy_walk_result_refs_add_flattened(output, fwr);
 		}
 	}
 
@@ -4597,8 +4615,10 @@ fy_scalar_walk_result_to_expr(struct fy_path_exec *fypx, struct fy_walk_result *
 		break;
 
 	case fwrt_number:
+		if (!isfinite(fwr->number))
+			goto err_out;
 
-		rc = asprintf(&buf, "%d", (int)fwr->number);
+		rc = asprintf(&buf, "%.*g", DBL_DECIMAL_DIG, fwr->number);
 		if (rc == -1)
 			goto err_out;
 
@@ -4610,6 +4630,9 @@ fy_scalar_walk_result_to_expr(struct fy_path_exec *fypx, struct fy_walk_result *
 		if (!exprt)
 			goto err_out;
 		if (collection_addressing) {
+			if (trunc(fwr->number) != fwr->number ||
+			    fwr->number < INT_MIN || fwr->number > INT_MAX)
+				goto err_out;
 			exprt->type = fpet_seq_index;
 			exprt->fyt = fy_token_create(FYTT_PE_SEQ_INDEX, &handle, (int)fwr->number);
 			if (!exprt->fyt)
@@ -4669,6 +4692,10 @@ fy_path_expr_execute(struct fy_path_exec *fypx, int level, struct fy_path_expr *
 		goto out;
 
 	diag = fypx->cfg.diag;
+	if (++fypx->exec_steps > FY_PATH_EXEC_STEP_LIMIT) {
+		fy_error(diag, "ypath execution step limit exceeded");
+		goto err_out;
+	}
 
 #ifdef DEBUG_EXPR
 	if (input)
@@ -4689,8 +4716,8 @@ fy_path_expr_execute(struct fy_path_exec *fypx, int level, struct fy_path_expr *
 			if (error)
 				goto err_out;
 			if (fwrn)
-				fy_walk_result_list_add_tail(&output->refs, fwrn);
-		}
+				fy_walk_result_refs_add_flattened(output, fwrn);
+			}
 		fy_walk_result_free(input);
 		input = NULL;
 		goto out;
@@ -4770,7 +4797,7 @@ fy_path_expr_execute(struct fy_path_exec *fypx, int level, struct fy_path_expr *
 			if (!output2)
 				continue;
 
-			fy_walk_result_list_add_tail(&output->refs, output2);
+			fy_walk_result_refs_add_flattened(output, output2);
 			output2 = NULL;
 		}
 		fy_walk_result_free(input);
@@ -5193,6 +5220,7 @@ static int fy_path_exec_execute_internal(struct fy_path_exec *fypx,
 
 	fy_walk_result_free(fypx->result);
 	fypx->result = NULL;
+	fypx->exec_steps = 0;
 
 	fwr = fy_path_exec_walk_result_create(fypx, fwrt_node_ref, fyn_start);
 	if (!fwr)

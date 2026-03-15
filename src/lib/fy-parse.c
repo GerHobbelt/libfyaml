@@ -36,6 +36,9 @@
 #define FORCE_ATOM_SIZE_CHECK_DEFAULT	false
 #endif
 
+static struct fy_eventp *
+fy_parser_event_resolve_hook_merge_key(struct fy_parser *fyp, struct fy_eventp *fyep);
+
 const char *fy_library_version(void)
 {
 #ifndef VERSION
@@ -1080,7 +1083,6 @@ fy_comment_atoms_seperated_by_ws(struct fy_parser *fyp, struct fy_atom *a, struc
 /* -1 error, 0, no comment attached, 1 comment attached */
 int fy_attach_comments_if_any(struct fy_parser *fyp, struct fy_token *fyt)
 {
-	struct fy_token_comment *tc;
 	struct fy_atom *handle;
 	struct fy_mark fym;
 	int c, rc, count, ref_indent;
@@ -1104,9 +1106,8 @@ int fy_attach_comments_if_any(struct fy_parser *fyp, struct fy_token *fyt)
 		fy_atom_reset(handle);
 
 		*handle = fyp->override_comment;
-		tc = container_of(handle, struct fy_token_comment, handle);
 		ref_indent = fyp->indent > 0 ? fyp->indent : 0;
-		tc->indent_delta = (int)handle->start_mark.column - ref_indent;
+		fy_atom_set_indent_delta(handle, (int)handle->start_mark.column - ref_indent);
 		count++;
 
 		fy_atom_reset(&fyp->override_comment);
@@ -1123,9 +1124,8 @@ int fy_attach_comments_if_any(struct fy_parser *fyp, struct fy_token *fyt)
 		fy_atom_reset(handle);
 
 		*handle = fyp->last_comment;
-		tc = container_of(handle, struct fy_token_comment, handle);
 		ref_indent = fyp->indent > 0 ? fyp->indent : 0;
-		tc->indent_delta = (int)handle->start_mark.column - ref_indent;
+		fy_atom_set_indent_delta(handle, (int)handle->start_mark.column - ref_indent);
 		count++;
 
 		fy_atom_reset(&fyp->last_comment);
@@ -2735,6 +2735,8 @@ int fy_fetch_block_entry(struct fy_parser *fyp, int c)
 
 	if (fyp_block_mode(fyp) && fyp->indent < fyp_column(fyp)) {
 
+		int old_indent = fyp->indent;	/* save before push for comment delta */
+
 		/* push the new indent level */
 		rc = fy_push_indent(fyp, fyp_column(fyp), false, fyp_line(fyp));
 		fyp_error_check(fyp, !rc, err_out_rc,
@@ -2747,6 +2749,7 @@ int fy_fetch_block_entry(struct fy_parser *fyp, int c)
 		/* if a last comment exists and is valid */
 		if ((fyp->cfg.flags & FYPCF_PARSE_COMMENTS) &&
 				(fy_atom_is_set(&fyp->override_comment) || fy_atom_is_set(&fyp->last_comment))) {
+			int ref_indent;
 
 			handle = fy_token_comment_handle(fyt, fycp_top, true);
 			fyp_error_check(fyp, handle, err_out,
@@ -2761,6 +2764,12 @@ int fy_fetch_block_entry(struct fy_parser *fyp, int c)
 				*handle = fyp->last_comment;
 				fy_atom_reset(&fyp->last_comment);
 			}
+
+			/* compute indent_delta — same logic as fy_attach_comments_if_any()
+			 * but using old_indent (before fy_push_indent) as reference, since
+			 * the emitter will use the pre-increase mapping indent as base */
+			ref_indent = old_indent > 0 ? old_indent : 0;
+			fy_atom_set_indent_delta(handle, (int)handle->start_mark.column - ref_indent);
 		}
 	}
 
@@ -3075,7 +3084,6 @@ int fy_fetch_value(struct fy_parser *fyp, int c)
 		/* if a last comment exists and is valid */
 		if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS) {
 
-			struct fy_token_comment *tc_dst, *tc_src;
 			struct fy_atom *key_handle, *handle;
 
 			if (fysk && fysk->token) {
@@ -3091,9 +3099,6 @@ int fy_fetch_value(struct fy_parser *fyp, int c)
 				fy_input_unref(handle->fyi);
 				fy_atom_reset(handle);
 				*handle = *key_handle;
-				tc_dst = container_of(handle, struct fy_token_comment, handle);
-				tc_src = container_of(key_handle, struct fy_token_comment, handle);
-				tc_dst->indent_delta = tc_src->indent_delta;
 				fy_atom_reset(key_handle);
 			}
 
@@ -4188,6 +4193,10 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 				/* note we don't generate formatted output */
 				/* we are merely checking for validity */
 				c = fy_reader_peek_at(fyr, 1);
+
+				FYR_PARSE_ERROR_CHECK(fyr, 0, 1, FYEM_SCAN,
+					c > 0, err_out,
+					"Unterminated or illegal UTF8 escape");
 
 				/* hex, unicode marks - json only supports u */
 				unicode_esc = !fy_reader_json_mode(fyr) ?
@@ -8436,8 +8445,9 @@ struct fy_eventp *fy_parser_event_resolve_hook_merge_key_start(struct fy_parser 
 	struct fy_document_iterator *fydi = NULL;
 	struct fy_eventp *fyep_next = NULL;
 	struct fy_event *fye;
-	struct fy_streaming_alias *fysa;
-	struct fy_streaming_alias_state *fysas;
+	struct fy_streaming_alias *fysa = NULL;
+	struct fy_streaming_alias_state *fysas = NULL;
+	bool fysa_added = false, fysas_pushed = false;
 
 	FYP_TOKEN_ERROR_CHECK(fyp, fyep->e.scalar.value, FYEM_PARSE,
 			!fyp->mks.active, err_out,
@@ -8465,11 +8475,13 @@ struct fy_eventp *fy_parser_event_resolve_hook_merge_key_start(struct fy_parser 
 	}
 
 	fy_document_iterator_destroy(fydi);
+	fydi = NULL;
 	fy_document_destroy(fyd);
 	fyd = NULL;
 
 	/* and add it to the start of the list */
 	fy_streaming_alias_list_add(&fyp->streaming_aliases, fysa);
+	fysa_added = true;
 
 	/* OK, trim mapping start and end */
 	fyep_next = fy_eventp_list_head(&fysa->events);
@@ -8477,17 +8489,38 @@ struct fy_eventp *fy_parser_event_resolve_hook_merge_key_start(struct fy_parser 
 			"not a mapping merge key start");
 	fy_eventp_list_del(&fysa->events, fyep_next);
 	fy_eventp_free(fyep_next);
+	fyep_next = NULL;
 
 	fyep_next = fy_eventp_list_tail(&fysa->events);
 	fyp_error_check(fyp, fyep_next->e.type == FYET_MAPPING_END, err_out,
 			"not a mapping merge key end");
 	fy_eventp_list_del(&fysa->events, fyep_next);
 	fy_eventp_free(fyep_next);
+	fyep_next = NULL;
+
+	/* An empty merge mapping contributes no events, so skip it and
+	 * continue with the next parser event instead of pushing empty state.
+	 */
+	if (fy_eventp_list_empty(&fysa->events)) {
+		fy_streaming_alias_list_del(&fyp->streaming_aliases, fysa);
+		fysa_added = false;
+		fy_parse_streaming_alias_clean(fyp, fysa);
+		fy_parse_streaming_alias_recycle(fyp, fysa);
+		fysa = NULL;
+
+		fy_parse_eventp_recycle(fyp, fyep);
+		fyep = fy_parse_private(fyp);
+		if (!fyep)
+			return NULL;
+
+		return fy_parser_event_resolve_hook_merge_key(fyp, fyep);
+	}
 
 	/* OK, push the new state */
 	fysas = fy_parse_streaming_alias_state_push(fyp, fysa);
 	fyp_error_check(fyp, fysas, err_out,
 			"fy_parse_streaming_alias_push() failed!");
+	fysas_pushed = true;
 	assert(fysas->next);
 
 	/* dispose of the event */
@@ -8506,6 +8539,12 @@ struct fy_eventp *fy_parser_event_resolve_hook_merge_key_start(struct fy_parser 
 err_out:
 	fy_document_iterator_destroy(fydi);
 	fy_document_destroy(fyd);
+	if (fysas_pushed)
+		fy_parse_streaming_alias_state_pop(fyp);
+	if (fysa_added)
+		fy_streaming_alias_list_del(&fyp->streaming_aliases, fysa);
+	fy_parse_streaming_alias_clean(fyp, fysa);
+	fy_parse_streaming_alias_recycle(fyp, fysa);
 	fy_parse_eventp_recycle(fyp, fyep_next);
 	fy_parse_eventp_recycle(fyp, fyep);
 	return NULL;
@@ -9189,13 +9228,13 @@ err_out:
 }
 
 // just for LLVMShutdown
-#if defined(HAVE_LIBCLANG) && HAVE_LIBCLANG
+#if defined(HAVE_LIBCLANG) && HAVE_LIBCLANG && defined(HAVE_LLVM_C_CORE_H)
 #include <llvm-c/Core.h>
 #endif
 
 void fy_shutdown(void)
 {
-#if defined(HAVE_LIBCLANG) && HAVE_LIBCLANG
+#if defined(HAVE_LIBCLANG) && HAVE_LIBCLANG && defined(HAVE_LLVM_C_CORE_H)
 	LLVMShutdown();
 #endif
 }
