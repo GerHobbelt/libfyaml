@@ -1503,64 +1503,6 @@ do_string:
 
 /* Type conversion functions - schema-aware where appropriate */
 
-/* Helper: Parse bool from string according to schema
- * Returns: -1 on error/no match, 0 for false, 1 for true
- */
-static int fy_parse_bool_from_string(enum fy_generic_schema schema, const char *text, size_t len)
-{
-	/* JSON schemas - strict */
-	if (schema == FYGS_YAML1_2_JSON || schema == FYGS_JSON) {
-		if (len == 4 && !memcmp(text, "true", 4))
-			return 1;
-		if (len == 5 && !memcmp(text, "false", 5))
-			return 0;
-		return -1;
-	}
-
-	/* YAML 1.2 Core */
-	if (schema == FYGS_YAML1_2_CORE) {
-		if (len == 4) {
-			if (!memcmp(text, "true", 4) || !memcmp(text, "True", 4) || !memcmp(text, "TRUE", 4))
-				return 1;
-		}
-		if (len == 5) {
-			if (!memcmp(text, "false", 5) || !memcmp(text, "False", 5) || !memcmp(text, "FALSE", 5))
-				return 0;
-		}
-		return -1;
-	}
-
-	/* YAML 1.1 - most permissive */
-	if (schema == FYGS_YAML1_1 || schema == FYGS_YAML1_1_PYYAML) {
-		if (schema != FYGS_YAML1_1_PYYAML && len == 1) {
-			if (*text == 'y' || *text == 'Y')
-				return 1;
-			if (*text == 'n' || *text == 'N')
-				return 0;
-		}
-		if (len == 2) {
-			if (!memcmp(text, "on", 2) || !memcmp(text, "On", 2) || !memcmp(text, "ON", 2))
-				return 1;
-		}
-		if (len == 3) {
-			if (!memcmp(text, "off", 3) || !memcmp(text, "Off", 3) || !memcmp(text, "OFF", 3))
-				return 0;
-		}
-		if (len == 4) {
-			if (!memcmp(text, "true", 4) || !memcmp(text, "True", 4) || !memcmp(text, "TRUE", 4))
-				return 1;
-		}
-		if (len == 5) {
-			if (!memcmp(text, "false", 5) || !memcmp(text, "False", 5) || !memcmp(text, "FALSE", 5))
-				return 0;
-		}
-		return -1;
-	}
-
-	/* Unknown schema - no match */
-	return -1;
-}
-
 fy_generic fy_gb_to_int(struct fy_generic_builder *gb, fy_generic v)
 {
 	enum fy_generic_type type;
@@ -2415,6 +2357,7 @@ struct fy_document_state *
 fy_generic_vds_get_document_state(fy_generic vds)
 {
 	struct fy_version vers_local, *vers = NULL;
+	struct fy_document_state *fyds;
 	const struct fy_tag **tags = NULL;
 	struct fy_tag *tag;
 	fy_generic vmap, vseq, v;
@@ -2447,7 +2390,16 @@ fy_generic_vds_get_document_state(fy_generic vds)
 	} else
 		tags = NULL;
 
-	return fy_document_state_default(vers, tags);
+	fyds = fy_document_state_default(vers, tags);
+	if (!fyds)
+		return NULL;
+
+	fyds->version_explicit = fy_get(vds, "version-explicit", (_Bool)false);
+	fyds->tags_explicit = fy_get(vds, "tags-explicit", (_Bool)false);
+	fyds->start_implicit = fy_get(vds, "start-implicit", (_Bool)true);
+	fyds->end_implicit = fy_get(vds, "end-implicit", (_Bool)true);
+
+	return fyds;
 }
 
 fy_generic
@@ -2460,6 +2412,8 @@ fy_generic_vds_create_from_document_state(struct fy_generic_builder *gb, fy_gene
 	fy_generic *vtags_items;
 	bool version_explicit;
 	bool tags_explicit;
+	bool start_implicit;
+	bool end_implicit;
 	const char *schema_txt;
 	fy_generic vds, vtags;
 
@@ -2474,6 +2428,8 @@ fy_generic_vds_create_from_document_state(struct fy_generic_builder *gb, fy_gene
 
 	version_explicit = fy_document_state_version_explicit(fyds);
 	tags_explicit = fy_document_state_tags_explicit(fyds);
+	start_implicit = fy_document_state_start_implicit(fyds);
+	end_implicit = fy_document_state_end_implicit(fyds);
 
 	vtags_items = alloca(sizeof(*vtags_items) * count);
 	for (i = 0; i < count; i++)
@@ -2495,6 +2451,8 @@ fy_generic_vds_create_from_document_state(struct fy_generic_builder *gb, fy_gene
 				"major", vers->major,
 				"minor", vers->minor),
 		"version-explicit", (_Bool)version_explicit,
+		"start-implicit", (_Bool)start_implicit,
+		"end-implicit", (_Bool)end_implicit,
 		"tags", vtags,
 		"tags-explicit", (_Bool)tags_explicit,
 		"schema", schema_txt);
@@ -2502,8 +2460,90 @@ fy_generic_vds_create_from_document_state(struct fy_generic_builder *gb, fy_gene
 	return vds;
 }
 
+size_t
+fy_document_state_format_tag(struct fy_document_state *fyds,
+			     const char *tag, size_t tag_size,
+			     char *buf, size_t maxsz)
+{
+	const char *full_tag;
+	size_t full_tag_size;
+	const char *tag_handle, *tag_suffix;
+	size_t tag_handle_size, tag_suffix_size;
+	int rc;
+	size_t formatted_tag_size;
+
+	if (!tag)
+		return 0;
+
+	if (tag_size == FY_NT)
+		tag_size = strlen(tag);
+
+	full_tag = tag;
+	full_tag_size = tag_size;
+	if (tag_size >= 4 && tag[0] == '!' && tag[1] == '<' && tag[tag_size - 1] == '>') {
+		full_tag = tag + 2;
+		full_tag_size = tag_size - 3;
+	}
+
+	rc = fy_document_state_shorten_tag(fyds, full_tag, full_tag_size,
+			&tag_handle, &tag_handle_size,
+			&tag_suffix, &tag_suffix_size);
+	if (!rc) {
+		formatted_tag_size = tag_handle_size + tag_suffix_size;
+		if (buf && maxsz > 0) {
+			if (tag_handle_size >= maxsz)
+				tag_handle_size = maxsz - 1;
+			memcpy(buf, tag_handle, tag_handle_size);
+			if (tag_handle_size < maxsz - 1) {
+				size_t copy = tag_suffix_size;
+				if (tag_handle_size + copy >= maxsz)
+					copy = maxsz - 1 - tag_handle_size;
+				memcpy(buf + tag_handle_size, tag_suffix, copy);
+				buf[tag_handle_size + copy] = '\0';
+			} else
+				buf[tag_handle_size] = '\0';
+		}
+	} else {
+		formatted_tag_size = tag_size;
+		if (buf && maxsz > 0) {
+			size_t copy = tag_size;
+			if (copy >= maxsz)
+				copy = maxsz - 1;
+			memcpy(buf, tag, copy);
+			buf[copy] = '\0';
+		}
+	}
+
+	return formatted_tag_size;
+}
+
+char *
+fy_document_state_format_tag_alloc(struct fy_document_state *fyds,
+				   const char *tag, size_t tag_size,
+				   size_t *formatted_tag_sizep)
+{
+	char *formatted_tag;
+	size_t formatted_tag_size;
+
+	formatted_tag_size = fy_document_state_format_tag(fyds, tag, tag_size, NULL, 0);
+	if (!formatted_tag_size && !tag)
+		return NULL;
+
+	formatted_tag = malloc(formatted_tag_size + 1);
+	if (!formatted_tag)
+		return NULL;
+
+	(void)fy_document_state_format_tag(fyds, tag, tag_size,
+					   formatted_tag, formatted_tag_size + 1);
+	if (formatted_tag_sizep)
+		*formatted_tag_sizep = formatted_tag_size;
+
+	return formatted_tag;
+}
+
 struct fy_token *
-fy_document_state_generic_create_token(struct fy_document_state *fyds, fy_generic v, enum fy_token_type type)
+fy_document_state_generic_create_token(struct fy_document_state *fyds, fy_generic v,
+				       enum fy_token_type type, enum fy_scalar_style style)
 {
 	struct fy_token *fyt = NULL;
 	struct fy_input *fyi = NULL;
@@ -2511,7 +2551,7 @@ fy_document_state_generic_create_token(struct fy_document_state *fyds, fy_generi
 	struct fy_tag_scan_info info;
 	int handle_length, uri_length, prefix_length;
 	const char *handle_start;
-	struct fy_token *fyt_td;
+	struct fy_token *fyt_td = NULL;
 	fy_generic_sized_string szstr;
 	fy_generic vstr;
 	struct fy_atom handle;
@@ -2523,12 +2563,15 @@ fy_document_state_generic_create_token(struct fy_document_state *fyds, fy_generi
 
 	szstr = fy_cast(vstr, fy_szstr_empty);
 
-	data = malloc(szstr.size);
-	if (!data)
-		goto err_out;
-	memcpy(data, szstr.data, szstr.size);
+	handle_length = 0;
+	uri_length = 0;
+	prefix_length = 0;
 
 	if (type == FYTT_TAG) {
+		data = fy_document_state_format_tag_alloc(fyds, szstr.data, szstr.size, &szstr.size);
+		if (!data)
+			goto err_out;
+
 		memset(&info, 0, sizeof(info));
 
 		rc = fy_tag_scan(data, szstr.size, &info);
@@ -2546,27 +2589,35 @@ fy_document_state_generic_create_token(struct fy_document_state *fyds, fy_generi
 		if (!fyt_td)
 			goto err_out;
 
+		fyi = fy_input_from_malloc_data(data, szstr.size, &handle, false);
+		if (!fyi)
+			goto err_out;
+		data = NULL;
+
 		handle.style = FYAS_URI;
-		handle.direct_output = false;
-		handle.storage_hint = 0;
-		handle.storage_hint_valid = false;
+
 	} else {
-		handle_length = 0;
-		uri_length = 0;
-		prefix_length = 0;
+		data = malloc(szstr.size);
+		if (!data)
+			goto err_out;
+		memcpy(data, szstr.data, szstr.size);
+
+		fyi = fy_input_from_malloc_data(data, szstr.size, &handle, false);
+		if (!fyi)
+			goto err_out;
+		data = NULL;
+
 	}
 
-	fyi = fy_input_from_malloc_data(data, szstr.size, &handle, false);
-	if (!fyi)
-		goto err_out;
-	data = NULL;
+	if ((unsigned int)style >= FYSS_MAX)
+		style = FYSS_ANY;
 
 	switch (type) {
 	case FYTT_SCALAR:
-		fyt = fy_token_create(FYTT_SCALAR, &handle, FYSS_ANY);
+		fyt = fy_token_create(FYTT_SCALAR, &handle, style);
 		break;
 	case FYTT_ALIAS:
-		fyt = fy_token_create(FYTT_SCALAR, &handle, NULL);
+		fyt = fy_token_create(FYTT_ALIAS, &handle, NULL);
 		break;
 	case FYTT_ANCHOR:
 		fyt = fy_token_create(FYTT_ANCHOR, &handle);

@@ -63,6 +63,7 @@ struct fy_generic_iterator {
 	struct fy_generic_iterator_cfg cfg;
 	enum fy_generic_iterator_state state;
 	struct fy_document_state *fyds;
+	enum fy_generic_schema schema;
 	fy_generic vds;
 	fy_generic iterate_root;
 	size_t idx;	/* document index */
@@ -99,6 +100,8 @@ int fy_generic_iterator_setup(struct fy_generic_iterator *fygi, const struct fy_
 void fy_generic_iterator_cleanup(struct fy_generic_iterator *fygi);
 struct fy_generic_iterator *fy_generic_iterator_create(void);
 void fy_generic_iterator_destroy(struct fy_generic_iterator *fygi);
+struct fy_event *
+fy_generic_iterator_generate_emit_next(struct fy_generic_iterator *fygi, struct fy_emitter *emit);
 
 struct fy_generic_iterator_body_result {
 	fy_generic v;
@@ -110,6 +113,15 @@ fy_generic_iterator_body_next_internal(struct fy_generic_iterator *fygi,
 					struct fy_generic_iterator_body_result *res);
 
 struct fy_token *
-fy_document_state_generic_create_token(struct fy_document_state *fyds, fy_generic v, enum fy_token_type type);
+fy_document_state_generic_create_token(struct fy_document_state *fyds, fy_generic v,
+				       enum fy_token_type type, enum fy_scalar_style style);
+size_t
+fy_document_state_format_tag(struct fy_document_state *fyds,
+			     const char *tag, size_t tag_size,
+			     char *buf, size_t maxsz);
+char *
+fy_document_state_format_tag_alloc(struct fy_document_state *fyds,
+				   const char *tag, size_t tag_size,
+				   size_t *formatted_tag_sizep);
 
 #endif

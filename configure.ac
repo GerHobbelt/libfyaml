@@ -6,6 +6,13 @@ AC_INIT([libfyaml],
 
 AC_CONFIG_AUX_DIR([build-aux])
 
+dnl define if set, undef if unset
+AC_DEFUN([FY_DEFINE_IF_YES], [
+	AS_IF([test "x$$1" = "x1"], [
+		AC_DEFINE([$1], [1], [$2])
+	])
+])
+
 AC_PATH_PROG([M4], [m4 gm4], [no])
 if test "x$M4" = xno ; then
    AC_MSG_ERROR([m4 missing])
@@ -30,7 +37,7 @@ m4_pattern_allow([^(AM_EXTRA_RECURSIVE_TARGETS|AM_PROG_AR)$])dnl
 # include them
 m4_ifdef([AM_EXTRA_RECURSIVE_TARGETS],
 	 [AM_EXTRA_RECURSIVE_TARGETS([doc-help doc-html doc-latexpdf doc-man doc-clean doc-markdown])],
-	 [AC_MSG_WARN([Old automake version without AM_EXTRA_RECURSIVE_TARGETS, doc-* rules won't be available at top level])])
+	 [AC_MSG_WARN([Old automake version without AM_EXTRA_RECURSIVE_TARGETS, doc-* rules will not be available at top level])])
 
 m4_define(fyaml_major, `echo $VERSION | cut -d. -f1 | cut -d- -f1`)
 m4_define(fyaml_minor, `echo $VERSION | cut -d. -f2 | cut -d- -f1`)
@@ -131,12 +138,18 @@ AC_CHECK_FUNCS([__builtin_bswap16 __builtin_bswap32 __builtin_bswap64])
 
 dnl for old autoconf version AX_APPEND_COMPILE_FLAGS does not work
 m4_version_prereq(2.64,
-	 [AX_APPEND_COMPILE_FLAGS([-Wall -Wsign-compare -Wno-stringop-overflow \
-				   -fvisibility=hidden -Wno-unused-function \
-				   -Wno-tautological-constant-out-of-range-compare \
-				   -std=c2x],
-				  [CFLAGS], [-pedantic -Werror])],
-         [CFLAGS="$CFLAGS -Wall -Wsign-compare"])
+	 [AX_APPEND_COMPILE_FLAGS([-Wall -Wextra], [CFLAGS], [])],
+         [CFLAGS="$CFLAGS -Wall -Wextra"])
+
+dnl try c2x and if that fails stick c11
+m4_version_prereq(2.64,
+	[ AS_CASE([" $CFLAGS "],
+		[*" -std="*], [],
+		[ AX_APPEND_COMPILE_FLAGS([-std=c2x], [CFLAGS]) ])
+	  AS_CASE([" $CFLAGS "],
+		[*" -std="*], [],
+		[ AX_APPEND_COMPILE_FLAGS([-std=c11], [CFLAGS]) ]) ],
+         [CFLAGS="$CFLAGS -std=c11"])
 
 dnl -O2 is universal no need for AX_APPEND_COMPILE_FLAGS
 if test "x$ax_enable_debug" != "xyes" ; then
@@ -669,8 +682,41 @@ AC_SUBST(HAVE_GENERIC)
 AC_SUBST(HAVE_REFLECTION)
 AM_CONDITIONAL([HAVE_GENERIC], [ test x$HAVE_GENERIC = x1 ])
 AM_CONDITIONAL([HAVE_REFLECTION], [ test x$HAVE_REFLECTION = x1 ])
-AC_DEFINE_UNQUOTED([HAVE_GENERIC], [$HAVE_GENERIC], [Define to 1 if generics are enabled])
-AC_DEFINE_UNQUOTED([HAVE_REFLECTION], [$HAVE_REFLECTION], [Define to 1 if reflection is enabled])
+
+FY_DEFINE_IF_YES([HAVE_GENERIC], [$HAVE_GENERIC], [Define to 1 if generics are enabled])
+FY_DEFINE_IF_YES([HAVE_REFLECTION], [$HAVE_REFLECTION], [Define to 1 if generics are enabled])
+
+dnl check if -latomic is needed
+AC_CACHE_CHECK([whether 8-byte atomics need -latomic],
+  [ac_cv_libatomic_needed],
+  [
+    save_LIBS="$LIBS"
+
+    AC_LINK_IFELSE(
+      [AC_LANG_PROGRAM([[]], [[
+        volatile unsigned long long v = 1;
+        return (int)__atomic_fetch_sub(&v, 1, __ATOMIC_SEQ_CST);
+      ]])],
+      [ac_cv_libatomic_needed=no],
+      [
+        LIBS="$save_LIBS -latomic"
+        AC_LINK_IFELSE(
+          [AC_LANG_PROGRAM([[]], [[
+            volatile unsigned long long v = 1;
+            return (int)__atomic_fetch_sub(&v, 1, __ATOMIC_SEQ_CST);
+          ]])],
+          [ac_cv_libatomic_needed=yes],
+          [ac_cv_libatomic_needed=unknown])
+      ])
+
+    LIBS="$save_LIBS"
+  ])
+
+AS_IF([test "x$ac_cv_libatomic_needed" = "xyes"], [LIBS="$LIBS -latomic" ],
+      [test "x$ac_cv_libatomic_needed" = "xunknown"],
+	[ AC_MSG_ERROR([compiler supports __atomic builtins but linking 8-byte atomics failed, even with -latomic]) ])
+AS_IF([test "x$ac_cv_libatomic_needed" = "xyes"], [ATOMIC_LIBS="-latomic"], [ ATOMIC_LIBS="" ])
+AC_SUBST([ATOMIC_LIBS])
 
 dnl trim cflags, cppflags, ldflags
 CFLAGS=`echo $CFLAGS | sed -e 's/^[ ]*//'`

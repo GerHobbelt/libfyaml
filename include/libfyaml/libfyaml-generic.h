@@ -308,7 +308,7 @@ typedef intptr_t fy_generic_value_signed;
 	(\
 		((fy_generic_value)(uint8_t)_v2 <<  8) | \
 		((fy_generic_value)(uint8_t)_v1 << 16) | \
-		((fy_generic_value)(uint8_t)_v0 << 24) | \
+		((fy_generic_value)(uint8_t)_v0 << 24)   \
 	)
 #endif
 
@@ -3425,6 +3425,69 @@ static inline char *fy_genericp_get_char_ptr(fy_generic *vp)
 	return fy_genericp_get_char_ptr_default(vp, "");
 }
 
+static inline fy_generic_value fy_generic_in_place_char_ptr_len0(void)
+{
+	return (0 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+}
+
+#ifdef FYGT_GENERIC_64
+static inline fy_generic_value
+fy_generic_in_place_char_ptr_len1(const char p[FY_STATIC_ARRAY_PARAM(1)])
+{
+	return FY_STRING_SHIFT7(p[0], 0, 0, 0, 0, 0, 0) |
+	       (1 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+}
+
+static inline fy_generic_value
+fy_generic_in_place_char_ptr_len2(const char p[FY_STATIC_ARRAY_PARAM(2)])
+{
+	return FY_STRING_SHIFT7(p[0], p[1], 0, 0, 0, 0, 0) |
+	       (2 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+}
+
+static inline fy_generic_value
+fy_generic_in_place_char_ptr_len3(const char p[FY_STATIC_ARRAY_PARAM(3)])
+{
+	return FY_STRING_SHIFT7(p[0], p[1], p[2], 0, 0, 0, 0) |
+	       (3 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+}
+
+static inline fy_generic_value
+fy_generic_in_place_char_ptr_len4(const char p[FY_STATIC_ARRAY_PARAM(4)])
+{
+	return FY_STRING_SHIFT7(p[0], p[1], p[2], p[3], 0, 0, 0) |
+	       (4 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+}
+
+static inline fy_generic_value
+fy_generic_in_place_char_ptr_len5(const char p[FY_STATIC_ARRAY_PARAM(5)])
+{
+	return FY_STRING_SHIFT7(p[0], p[1], p[2], p[3], p[4], 0, 0) |
+	       (5 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+}
+
+static inline fy_generic_value
+fy_generic_in_place_char_ptr_len6(const char p[FY_STATIC_ARRAY_PARAM(6)])
+{
+	return FY_STRING_SHIFT7(p[0], p[1], p[2], p[3], p[4], p[5], 0) |
+	       (6 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+}
+#else
+static inline fy_generic_value
+fy_generic_in_place_char_ptr_len1(const char p[FY_STATIC_ARRAY_PARAM(1)])
+{
+	return FY_STRING_SHIFT3(p[0], 0, 0) |
+	       (1 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+}
+
+static inline fy_generic_value
+fy_generic_in_place_char_ptr_len2(const char p[FY_STATIC_ARRAY_PARAM(2)])
+{
+	return FY_STRING_SHIFT3(p[0], p[1], 0) |
+	       (2 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+}
+#endif
+
 /**
  * fy_generic_get_alias_alloca() - Get the anchor name string from an alias generic.
  *
@@ -3534,7 +3597,7 @@ static inline char *fy_genericp_get_char_ptr(fy_generic *vp)
 		else {											\
 			static const fy_generic_decorated_int _vv FY_INT_ALIGNMENT = { 			\
 				.sv = (signed long long)fy_ensure_const(_v),				\
-				.flags = fy_int_is_unsigned(_v) ? FYGDIF_UNSIGNED_RANGE_EXTEND : 0, 	\
+				.flags = fy_int_is_unsigned(fy_ensure_const(_v)) ? FYGDIF_UNSIGNED_RANGE_EXTEND : 0, \
 			};										\
 			assert(((uintptr_t)&_vv & FY_INPLACE_TYPE_MASK) == 0);				\
 			_r = (fy_generic_value)&_vv | FY_INT_OUTPLACE_V;				\
@@ -3579,47 +3642,33 @@ static inline fy_generic_value fy_generic_in_place_char_ptr_len(const char *p, c
 
 	switch (len) {
 	case 0:
-		v = (0 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+		v = fy_generic_in_place_char_ptr_len0();
+		break;
+	case 1:
+		v = fy_generic_in_place_char_ptr_len1(p);
+		break;
+	case 2:
+		v = fy_generic_in_place_char_ptr_len2(p);
 		break;
 #ifdef FYGT_GENERIC_64
-	case 1:
-		v = FY_STRING_SHIFT7(p[0], 0, 0, 0, 0, 0, 0) |
-		     (1 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
-		break;
-	case 2:
-		v = FY_STRING_SHIFT7(p[0], p[1], 0, 0, 0, 0, 0) |
-		     (2 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
-		break;
 	case 3:
-		v = FY_STRING_SHIFT7(p[0], p[1], p[2], 0, 0, 0, 0) |
-		     (3 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+		v = fy_generic_in_place_char_ptr_len3(p);
 		break;
 	case 4:
-		v = FY_STRING_SHIFT7(p[0], p[1], p[2], p[3], 0, 0, 0) |
-		     (4 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+		v = fy_generic_in_place_char_ptr_len4(p);
 		break;
 	case 5:
-		v = FY_STRING_SHIFT7(p[0], p[1], p[2], p[3], p[4], 0, 0) |
-		     (5 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+		v = fy_generic_in_place_char_ptr_len5(p);
 		break;
 	case 6:
-		v = FY_STRING_SHIFT7(p[0], p[1], p[2], p[3], p[4], p[5], 0) |
-		     (6 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
-		break;
-#else
-	case 1:
-		v = FY_STRING_SHIFT3(p[0], 0, 0) |
-		     (1 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
-		break;
-	case 2:
-		v = FY_STRING_SHIFT3(p[0], p[1], 0) |
-		     (2 << FY_STRING_INPLACE_SIZE_SHIFT) | FY_STRING_INPLACE_V;
+		v = fy_generic_in_place_char_ptr_len6(p);
 		break;
 #endif
 	default:
 		v = fy_invalid_value;
 		break;
 	}
+
 	return v;
 }
 
@@ -8165,25 +8214,27 @@ fy_generic_document_builder_process_event(struct fy_generic_document_builder *fy
  * Control how input is located and how the YAML parser behaves during a
  * fy_parse() / fy_local_parse() / fy_gb_parse() call.
  *
- * @FYOPPF_DISABLE_DIRECTORY:     Do not include a document-state directory in the result
- * @FYOPPF_MULTI_DOCUMENT:        Allow multiple YAML documents in the input
- * @FYOPPF_TRACE:                 Enable parser trace output for debugging
- * @FYOPPF_DONT_RESOLVE:          Skip tag/anchor resolution (used by the YAML test-suite)
- * @FYOPPF_INPUT_TYPE_STRING:     Input data is a NUL-terminated or sized string
- * @FYOPPF_INPUT_TYPE_FILENAME:   Input data is a filename (const char \*)
- * @FYOPPF_INPUT_TYPE_INT_FD:     Input data is a file descriptor (int cast to void \*)
- * @FYOPPF_INPUT_TYPE_STDIN:      Read input from stdin (input_data ignored)
- * @FYOPPF_MODE_AUTO:             Auto-detect YAML version / JSON from content
- * @FYOPPF_MODE_YAML_1_1:         Force YAML 1.1 parsing rules
- * @FYOPPF_MODE_YAML_1_2:         Force YAML 1.2 parsing rules
- * @FYOPPF_MODE_YAML_1_3:         Force YAML 1.3 parsing rules
- * @FYOPPF_MODE_JSON:             Force JSON parsing rules
- * @FYOPPF_MODE_YAML_1_1_PYYAML: Force YAML 1.1 PyYAML-compatible parsing rules
- * @FYOPPF_COLLECT_DIAG:          Collect diagnostic messages into the result
- * @FYOPPF_KEEP_COMMENTS:         Preserve comments in the parsed representation
- * @FYOPPF_CREATE_MARKERS:        Attach position markers to parsed nodes
- * @FYOPPF_KEEP_STYLE:            Preserve original scalar/collection style information
- * @FYOPPF_KEEP_FAILSAFE_STR:     Keep failsafe-schema plain string tags
+ * @FYOPPF_DISABLE_DIRECTORY:       Do not include a document-state directory in the result
+ * @FYOPPF_MULTI_DOCUMENT:          Allow multiple YAML documents in the input
+ * @FYOPPF_TRACE:                   Enable parser trace output for debugging
+ * @FYOPPF_DONT_RESOLVE:            Skip tag/anchor resolution (used by the YAML test-suite)
+ * @FYOPPF_INPUT_TYPE_STRING:       Input data is a NUL-terminated or sized string
+ * @FYOPPF_INPUT_TYPE_FILENAME:     Input data is a filename (const char \*)
+ * @FYOPPF_INPUT_TYPE_INT_FD:       Input data is a file descriptor (int cast to void \*)
+ * @FYOPPF_INPUT_TYPE_STDIN:        Read input from stdin (input_data ignored)
+ * @FYOPPF_MODE_AUTO:               Auto-detect YAML version / JSON from content
+ * @FYOPPF_MODE_YAML_1_1:           Force YAML 1.1 parsing rules
+ * @FYOPPF_MODE_YAML_1_2:           Force YAML 1.2 parsing rules
+ * @FYOPPF_MODE_YAML_1_3:           Force YAML 1.3 parsing rules
+ * @FYOPPF_MODE_JSON:               Force JSON parsing rules
+ * @FYOPPF_MODE_YAML_1_1_PYYAML:    Force YAML 1.1 PyYAML-compatible parsing rules
+ * @FYOPPF_COLLECT_DIAG:            Collect diagnostic messages into the result
+ * @FYOPPF_KEEP_COMMENTS:           Preserve comments in the parsed representation
+ * @FYOPPF_CREATE_MARKERS:          Attach position markers to parsed nodes
+ * @FYOPPF_KEEP_STYLE:              Preserve original scalar/collection style information
+ * @FYOPPF_KEEP_FAILSAFE_STR:       Keep failsafe-schema plain string tags
+ * @FYOPPF_SLOPPY_FLOW_INDENTATION: Allow sloppy indentation in flow mode
+ * @FYOPPF_RELAX_FLOW_DOC:          Documents are implicitly started via flow markers
  */
 enum fy_op_parse_flags {
 	FYOPPF_DISABLE_DIRECTORY	= FY_BIT(0),
@@ -8205,6 +8256,8 @@ enum fy_op_parse_flags {
 	FYOPPF_CREATE_MARKERS		= FY_BIT(16),
 	FYOPPF_KEEP_STYLE		= FY_BIT(17),
 	FYOPPF_KEEP_FAILSAFE_STR	= FY_BIT(18),
+	FYOPPF_SLOPPY_FLOW_INDENTATION	= FY_BIT(19),
+	FYOPPF_RELAXED_FLOW_DOC		= FY_BIT(20),
 };
 
 /* FYOPPF_DEFAULT - Recommended default parse flags (disables directory) */
@@ -10516,10 +10569,13 @@ enum fy_generic_iterator_cfg_flags {
  *
  * @flags: The document iterator flags
  * @vdir: The directory of the parsed input
+ * @schema: The schema to use for scalar formatting when a document does not
+ *          carry schema metadata
  */
 struct fy_generic_iterator_cfg {
 	enum fy_generic_iterator_cfg_flags flags;
 	fy_generic vdir;
+	enum fy_generic_schema schema;
 };
 
 /**

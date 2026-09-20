@@ -101,20 +101,19 @@ function(add_libfyaml_tests)
     set(CREATE_PATTERN "fy_check_suite_add_test_case[ \t]*[(][^,]*,[ \t]*\"([^\"]+)\"")
     set(ADD_PATTERN "fy_check_testcase_add_test[ \t]*[(][^,]*,[ \t]*([^)]+)")
     foreach(FILE_PATH IN LISTS C_FILES)
-        # Read the file line by line
-        file(STRINGS "${FILE_PATH}" LINES)
+        file(READ "${FILE_PATH}" FILE_CONTENTS)
         set(SUITE "")
-        foreach(LINE IN LISTS LINES)
-            if(LINE MATCHES "${CREATE_PATTERN}")
-                string(REGEX REPLACE ".*${CREATE_PATTERN}.*" "\\1" SUITE "${LINE}")
-            endif()
+        string(REGEX MATCH "${CREATE_PATTERN}" CREATE_MATCH "${FILE_CONTENTS}")
+        if(CREATE_MATCH)
+            string(REGEX REPLACE ".*${CREATE_PATTERN}.*" "\\1" SUITE "${CREATE_MATCH}")
+        endif()
 
-            if(LINE MATCHES "${ADD_PATTERN}")
-                string(REGEX REPLACE ".*${ADD_PATTERN}.*" "\\1" TEST_NAME "${LINE}")
-                add_tap_test("libfyaml/${SUITE}/${TEST_NAME}" libfyaml "${TEST_NAME}"
-                    LABELS "libfyaml"
-                )
-            endif()
+        string(REGEX MATCHALL "fy_check_testcase_add_test[ \t]*[(][^,]*,[ \t]*[^)]+[)]" ADD_MATCHES "${FILE_CONTENTS}")
+        foreach(ADD_MATCH IN LISTS ADD_MATCHES)
+            string(REGEX REPLACE ".*${ADD_PATTERN}.*" "\\1" TEST_NAME "${ADD_MATCH}")
+            add_tap_test("libfyaml/${SUITE}/${TEST_NAME}" libfyaml "${TEST_NAME}"
+                LABELS "libfyaml"
+            )
         endforeach()
     endforeach()
 
@@ -160,14 +159,29 @@ endfunction()
 
 # Function to add testemitter tests
 function(add_testemitter_tests test_name extra_args)
-    file(GLOB yaml_files "${CMAKE_CURRENT_SOURCE_DIR}/test/emitter-examples/*.yaml")
+    cmake_parse_arguments(TE "" "SUITE_NAME" "EXTRA_ENV" ${ARGN})
 
+    if(TE_SUITE_NAME)
+        set(suite_name "${TE_SUITE_NAME}")
+    else()
+        set(suite_name "${test_name}")
+    endif()
+
+    file(GLOB yaml_files "${CMAKE_CURRENT_SOURCE_DIR}/test/emitter-examples/*.yaml")
+    set(test_ids "")
     foreach(yaml_file ${yaml_files})
         get_filename_component(test_id "${yaml_file}" NAME)
+        list(APPEND test_ids "${test_id}")
+    endforeach()
 
-        add_tap_test("${test_name}/${test_id}" "${test_name}" "${test_id}"
+    foreach(test_id ${test_ids})
+        if(test_id STREQUAL "" OR test_id MATCHES "^#")
+            continue()
+        endif()
+
+        add_tap_test("${test_name}/${test_id}" "${suite_name}" "${test_id}"
             LABELS "${test_name}"
-            EXTRA_ENV "EXTRA_DUMP_ARGS=${extra_args}"
+            EXTRA_ENV "EXTRA_DUMP_ARGS=${extra_args};${TE_EXTRA_ENV}"
         )
     endforeach()
 endfunction()

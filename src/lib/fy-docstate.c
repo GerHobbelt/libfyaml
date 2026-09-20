@@ -204,6 +204,7 @@ struct fy_document_state *fy_document_state_copy(struct fy_document_state *fyds)
 
 		/* take reference */
 		fy_input_ref(fyt->handle.fyi);
+		fyt->handle.token_atom = true;
 
 		fyds_new->fyt_ds = fyt;
 	}
@@ -219,6 +220,7 @@ struct fy_document_state *fy_document_state_copy(struct fy_document_state *fyds)
 
 		/* take reference */
 		fy_input_ref(fyt->handle.fyi);
+		fyt->handle.token_atom = true;
 
 		fyds_new->fyt_vd = fyt;
 	}
@@ -238,6 +240,7 @@ struct fy_document_state *fy_document_state_copy(struct fy_document_state *fyds)
 
 		/* take reference */
 		fy_input_ref(fyt_td->handle.fyi);
+		fyt_td->handle.token_atom = true;
 
 		/* append to the new document state */
 		fy_token_list_add_tail(&fyds_new->fyt_td, fyt_td);
@@ -480,7 +483,8 @@ int fy_document_state_shorten_tag(struct fy_document_state *fyds,
 {
 	const char *td_handle, *td_prefix;
 	size_t td_handle_size, td_prefix_size;
-	struct fy_token *fyt;
+	struct fy_token *fyt, *fyt_best = NULL;
+	size_t td_prefix_size_best = 0;
 
 	if (!fyds || !full_tag || !handlep || !handle_sizep || !suffixp || !suffix_sizep)
 		return -1;
@@ -494,21 +498,29 @@ int fy_document_state_shorten_tag(struct fy_document_state *fyds,
 		if (!td_prefix)
 			continue;
 
-		if (td_prefix_size < full_tag_size && !memcmp(td_prefix, full_tag, td_prefix_size)) {
+		if (td_prefix_size == 0 || td_prefix_size >= full_tag_size)
+			continue;
+		if (memcmp(td_prefix, full_tag, td_prefix_size))
+			continue;
+		if (td_prefix_size_best >= td_prefix_size)
+			continue;
 
-			td_handle = fy_tag_directive_token_handle(fyt, &td_handle_size);
-			if (!td_handle)
-				continue;
-
-			*handlep = td_handle;
-			*handle_sizep = td_handle_size;
-			*suffixp = full_tag + td_prefix_size;
-			*suffix_sizep = full_tag_size - td_prefix_size;
-
-			return 0;
-		}
+		fyt_best = fyt;
+		td_prefix_size_best = td_prefix_size;
 
 	}
 
-	return -1;
+	if (!fyt_best)
+		return -1;
+
+	td_handle = fy_tag_directive_token_handle(fyt_best, &td_handle_size);
+	if (!td_handle)
+		return -1;
+
+	*handlep = td_handle;
+	*handle_sizep = td_handle_size;
+	*suffixp = full_tag + td_prefix_size_best;
+	*suffix_sizep = full_tag_size - td_prefix_size_best;
+
+	return 0;
 }

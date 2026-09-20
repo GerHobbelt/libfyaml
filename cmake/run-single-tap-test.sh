@@ -56,6 +56,51 @@ function run_tool() {
     fi
 }
 
+function emitter_subtest() {
+    local dump_args="$1"
+    local parse_args="$2"
+    local f="${TEST_DIR}/emitter-examples/${test_id}"
+    local t1
+    local t2
+    local res
+    local pass_parse
+
+    t1=$(mktemp)
+    t2=$(mktemp)
+
+    res="not ok"
+    pass_parse=0
+
+    # Intentionally expand the argument variables as shell words.
+    run_tool "${FY_TOOL}" ${parse_args} "$f" >"$t1"
+    if [ $? -eq 0 ]; then
+        run_tool "${FY_TOOL}" ${dump_args} "$f" | \
+            run_tool "${FY_TOOL}" ${parse_args} - >"$t2"
+        if [ $? -eq 0 ]; then
+            pass_parse=1
+        fi
+    fi
+
+    if [ "$pass_parse" == "1" ]; then
+        diff -u "$t1" "$t2"
+        if [ $? -eq 0 ]; then
+            res="ok"
+        else
+            res="not ok"
+        fi
+    fi
+
+    rm -f "$t1" "$t2"
+
+    echo "$res 1 - $test_id"
+
+    if [ "$res" == "ok" ]; then
+        exit 0
+    else
+        exit 1
+    fi
+}
+
 # Python pytest suite: handled before FY_TOOL validation (no C tool needed)
 case "$test_suite" in
     python)
@@ -147,123 +192,18 @@ case "$test_suite" in
         ;;
 
     testemitter)
-        f="${TEST_DIR}/emitter-examples/${test_id}"
-
-        t1=$(mktemp)
-        t2=$(mktemp)
-
-        res="not ok"
-
-        pass_parse=0
-        run_tool "${FY_TOOL}" --testsuite --disable-flow-markers "$f" >"$t1"
-        if [ $? -eq 0 ]; then
-            run_tool "${FY_TOOL}" --dump "$f" | \
-                run_tool "${FY_TOOL}" --testsuite --disable-flow-markers - >"$t2"
-            if [ $? -eq 0 ]; then
-                pass_parse=1
-            fi
-        fi
-
-        if [ "$pass_parse" == "1" ]; then
-            diff -u "$t1" "$t2"
-            if [ $? -eq 0 ]; then
-                res="ok"
-            else
-                res="not ok"
-            fi
-        else
-            res="not ok"
-        fi
-
-        rm -f "$t1" "$t2"
-
-        echo "$res 1 - $test_id"
-
-        if [ "$res" == "ok" ]; then
-            exit 0
-        else
-            exit 1
-        fi
+        emitter_subtest "${EMITTER_DUMP_ARGS:---dump} ${EXTRA_DUMP_ARGS}" \
+            "${EMITTER_PARSE_ARGS:---testsuite --disable-flow-markers}"
         ;;
 
     testemitter-streaming)
-        f="${TEST_DIR}/emitter-examples/${test_id}"
-
-        t1=$(mktemp)
-        t2=$(mktemp)
-
-        res="not ok"
-
-        pass_parse=0
-        run_tool "${FY_TOOL}" --testsuite --disable-flow-markers "$f" >"$t1"
-        if [ $? -eq 0 ]; then
-            run_tool "${FY_TOOL}" --dump --streaming "$f" | \
-                run_tool "${FY_TOOL}" --testsuite --disable-flow-markers - >"$t2"
-            if [ $? -eq 0 ]; then
-                pass_parse=1
-            fi
-        fi
-
-        if [ "$pass_parse" == "1" ]; then
-            diff -u "$t1" "$t2"
-            if [ $? -eq 0 ]; then
-                res="ok"
-            else
-                res="not ok"
-            fi
-        else
-            res="not ok"
-        fi
-
-        rm -f "$t1" "$t2"
-
-        echo "$res 1 - $test_id"
-
-        if [ "$res" == "ok" ]; then
-            exit 0
-        else
-            exit 1
-        fi
+        emitter_subtest "${EMITTER_DUMP_ARGS:---dump} --streaming ${EXTRA_DUMP_ARGS}" \
+            "${EMITTER_PARSE_ARGS:---testsuite --disable-flow-markers}"
         ;;
 
     testemitter-restreaming)
-        f="${TEST_DIR}/emitter-examples/${test_id}"
-
-        t1=$(mktemp)
-        t2=$(mktemp)
-
-        res="not ok"
-
-        pass_parse=0
-        run_tool "${FY_TOOL}" --testsuite --disable-flow-markers "$f" >"$t1"
-        if [ $? -eq 0 ]; then
-            run_tool "${FY_TOOL}" --dump --streaming --recreating "$f" | \
-                run_tool "${FY_TOOL}" --testsuite --disable-flow-markers - >"$t2"
-            if [ $? -eq 0 ]; then
-                pass_parse=1
-            fi
-        fi
-
-        if [ "$pass_parse" == "1" ]; then
-            diff -u "$t1" "$t2"
-            if [ $? -eq 0 ]; then
-                res="ok"
-            else
-                res="not ok"
-            fi
-        else
-            res="not ok"
-        fi
-
-        rm -f "$t1" "$t2"
-
-        echo "$res 1 - $test_id"
-
-        if [ "$res" == "ok" ]; then
-            exit 0
-        else
-            exit 1
-        fi
+        emitter_subtest "${EMITTER_DUMP_ARGS:---dump} --streaming --recreating ${EXTRA_DUMP_ARGS}" \
+            "${EMITTER_PARSE_ARGS:---testsuite --disable-flow-markers}"
         ;;
 
     testsuite|testsuite-json|testsuite-resolution)
@@ -317,35 +257,25 @@ case "$test_suite" in
         desctxt=$(cat 2>/dev/null "$tst/===")
 
         t_output=$(mktemp)
-        t_expected=$(mktemp)
-        t_output_stripped=$(mktemp)
 
         res="not ok"
 
         pass_yaml=0
-        run_tool "${FY_TOOL}" --generic-testsuite "$tst/in.yaml" >"$t_output" 2>/dev/null
+        run_tool "${FY_TOOL}" --generic-testsuite --keep-style \
+            --schema yaml1.2-failsafe "$tst/in.yaml" >"$t_output" 2>/dev/null
         if [ $? -eq 0 ]; then
             pass_yaml=1
         fi
 
         if [ -e "$tst/error" ]; then
-            # test is expected to fail
             if [ $pass_yaml == "0" ]; then
                 res="ok"
             else
                 res="not ok"
             fi
         else
-            # test is expected to pass
             if [ $pass_yaml == "1" ]; then
-                # Strip formatting from expected output
-                ${TEST_DIR}/../scripts/strip-testsuite-formatting.sh "$tst/test.event" > "$t_expected"
-
-                # Strip formatting from actual generic output too
-                ${TEST_DIR}/../scripts/strip-testsuite-formatting.sh "$t_output" > "$t_output_stripped"
-
-                # Compare both stripped outputs
-                diff -u "$t_expected" "$t_output_stripped"
+                diff -u "$tst/test.event" "$t_output"
                 if [ $? -eq 0 ]; then
                     res="ok"
                 else
@@ -356,24 +286,11 @@ case "$test_suite" in
             fi
         fi
 
-        rm -f "$t_output" "$t_expected" "$t_output_stripped"
+        rm -f "$t_output"
 
-        # Check for xfails (expected failures)
-        # C4HZ: Hex value conversion (0xFFEEBB -> 16772795) - requires yaml1.2-failsafe schema
-        xfaillist="C4HZ"
+        echo "$res 1 $test_id - $desctxt"
 
-        directive=""
-        for xfail in $xfaillist; do
-            if [ "$test_id" == "$xfail" ]; then
-                directive=" # TODO: known failure."
-                break
-            fi
-        done
-
-        echo "$res 1 $test_id - $desctxt$directive"
-
-        # xfails should not cause test failure
-        if [ "$res" == "ok" ] || [ -n "$directive" ]; then
+        if [ "$res" == "ok" ]; then
             exit 0
         else
             exit 1

@@ -65,6 +65,7 @@ include(CMakeDependentOption)
 include(CTest)
 include(TestBigEndian)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckLibClang.cmake)
+include(FetchContent)
 
 # does this CMake version understand generator expressions?
 if(${CMAKE_VERSION} VERSION_LESS "3.27")
@@ -303,7 +304,6 @@ if(BUILD_TESTING AND (NOT CMAKE_CROSSCOMPILING OR HAVE_WINE))
     # Always used when cross-compiling (skips host detection above) so that
     # check is compiled for the target platform and can run under wine.
     if(NOT HAVE_CHECK)
-        include(FetchContent)
         message(STATUS "check framework not found, fetching via FetchContent...")
         FetchContent_Declare(
             check
@@ -625,7 +625,6 @@ if(NOT JSONTESTSUITECHECKOUT)
 endif()
 
 # FetchContent for test suites (downloaded at configure time when network is available)
-include(FetchContent)
 if(ENABLE_NETWORK)
     FetchContent_Declare(
         yaml_test_suite
@@ -720,6 +719,34 @@ if(HAVE_ASAN)
   set(ASAN_C_FLAGS "-fsanitize=address,signed-integer-overflow,undefined" "-fno-omit-frame-pointer")
 endif()
 
+# Some older toolchains need libatomic for 8-byte atomics.
+set(ATOMIC_LIBS "")
+if(NOT WIN32 AND NOT MSVC)
+    set(CMAKE_REQUIRED_LIBRARIES_SAVE "${CMAKE_REQUIRED_LIBRARIES}")
+    set(CMAKE_REQUIRED_LIBRARIES "")
+    check_c_source_compiles("
+        volatile unsigned long long v = 1;
+        int main(void) {
+            return (int)__atomic_fetch_sub(&v, 1, __ATOMIC_SEQ_CST);
+        }
+    " ATOMIC_LINKS_WITHOUT_LIBATOMIC)
+    if(NOT ATOMIC_LINKS_WITHOUT_LIBATOMIC)
+        set(CMAKE_REQUIRED_LIBRARIES "atomic")
+        check_c_source_compiles("
+            volatile unsigned long long v = 1;
+            int main(void) {
+                return (int)__atomic_fetch_sub(&v, 1, __ATOMIC_SEQ_CST);
+            }
+        " ATOMIC_LINKS_WITH_LIBATOMIC)
+        if(ATOMIC_LINKS_WITH_LIBATOMIC)
+            set(ATOMIC_LIBS "-latomic")
+        else()
+            message(FATAL_ERROR "compiler supports __atomic builtins but linking 8-byte atomics failed, even with -latomic")
+        endif()
+    endif()
+    set(CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES_SAVE}")
+endif()
+
 # Build common compiler flags for all targets
 set(COMMON_C_FLAGS)
 if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
@@ -752,24 +779,6 @@ if(NOT MSVC)
         list(APPEND COMMON_C_FLAGS -Wextra)
     endif()
 
-    check_c_compiler_flag(-Wno-unused-function COMPILER_SUPPORTS_WNO_UNUSED_FUNCTION)
-    if(COMPILER_SUPPORTS_WNO_UNUSED_FUNCTION)
-        list(APPEND COMMON_C_FLAGS -Wno-unused-function)
-    endif()
-
-    check_c_compiler_flag(-Wno-stringop-overflow COMPILER_SUPPORTS_WNO_STRINGOP_OVERFLOW)
-    if(COMPILER_SUPPORTS_WNO_STRINGOP_OVERFLOW)
-        list(APPEND COMMON_C_FLAGS -Wno-stringop-overflow)
-    endif()
-
-    if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-        check_c_compiler_flag(-Wno-tautological-constant-out-of-range-compare
-                              COMPILER_SUPPORTS_WNO_TAUTOLOGICAL_CONSTANT_OUT_OF_RANGE_COMPARE)
-        if(COMPILER_SUPPORTS_WNO_TAUTOLOGICAL_CONSTANT_OUT_OF_RANGE_COMPARE)
-            list(APPEND COMMON_C_FLAGS -Wno-tautological-constant-out-of-range-compare)
-        endif()
-    endif()
-
     set(USE_STD 0)
 
     if(NOT USE_STD)
@@ -784,6 +793,14 @@ if(NOT MSVC)
         check_c_compiler_flag(-std=c2x COMPILER_SUPPORTS_C2X)
         if(COMPILER_SUPPORTS_C2X)
             list(APPEND COMMON_C_FLAGS -std=c2x)
+            set(USE_STD 1)
+        endif()
+    endif()
+
+    if(NOT USE_STD)
+        check_c_compiler_flag(-std=gnu11 COMPILER_SUPPORTS_GNU11)
+        if(COMPILER_SUPPORTS_GNU11)
+            list(APPEND COMMON_C_FLAGS -std=gnu11)
             set(USE_STD 1)
         endif()
     endif()
@@ -1329,6 +1346,10 @@ if(LIBM)
     target_link_libraries(fyaml PUBLIC ${LIBM})
     target_link_libraries(fyaml_static PUBLIC ${LIBM})
 endif()
+if(ATOMIC_LIBS)
+    target_link_libraries(fyaml PUBLIC ${ATOMIC_LIBS})
+    target_link_libraries(fyaml_static PUBLIC ${ATOMIC_LIBS})
+endif()
 
 # Add libclang support if available
 add_libclang_to_target(fyaml PRIVATE)
@@ -1565,6 +1586,7 @@ if(CAN_TEST)
             test/libfyaml-test-core.c
             test/libfyaml-test-meta.c
             test/libfyaml-test-emit.c
+            test/libfyaml-test-atom-analysis.c
             test/libfyaml-test-emit-bugs.c
             test/libfyaml-test-parse-bugs.c
             test/libfyaml-test-allocator.c
@@ -1580,7 +1602,10 @@ if(CAN_TEST)
         )
 
         target_compile_options(libfyaml-test PRIVATE ${COMMON_C_FLAGS})
-        target_compile_definitions(libfyaml-test PRIVATE ${COMMON_C_DEFINITIONS})
+        target_compile_definitions(libfyaml-test PRIVATE
+            HAVE_CONFIG_H
+            ${COMMON_C_DEFINITIONS}
+        )
 
         target_include_directories(libfyaml-test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -1639,6 +1664,12 @@ if(CAN_TEST)
     add_testemitter_tests(testemitter "")
     add_testemitter_tests(testemitter-streaming "--streaming")
     add_testemitter_tests(testemitter-restreaming "--streaming --recreating")
+    if(HAVE_GENERIC)
+        add_testemitter_tests(testemitter-generic-failsafe ""
+            SUITE_NAME testemitter
+            EXTRA_ENV "EMITTER_DUMP_ARGS=--generic --keep-style --schema yaml1.2-failsafe"
+        )
+    endif()
 
     # Network-dependent tests using FetchContent
     if(HAVE_NETWORK)
@@ -1695,7 +1726,10 @@ if(CAN_TEST)
     )
 
     if(HAVE_GENERIC)
-        list(APPEND TEST_SUITES testsuite-generic.test)
+        list(APPEND TEST_SUITES
+            testsuite-generic.test
+            testemitter-generic-failsafe.test
+        )
     endif()
     if(HAVE_JQ)
         list(APPEND TEST_SUITES testsuite-json.test)

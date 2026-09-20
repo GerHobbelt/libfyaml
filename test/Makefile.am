@@ -50,6 +50,7 @@ libfyaml_test_SOURCES = \
 	libfyaml-test-core.c \
 	libfyaml-test-meta.c \
 	libfyaml-test-emit.c \
+	libfyaml-test-atom-analysis.c \
 	libfyaml-test-allocator.c \
 	libfyaml-test-fuzzing.c \
 	libfyaml-test-emit-bugs.c \
@@ -135,6 +136,9 @@ TESTS += testerrors.test
 TESTS += testemitter.test
 TESTS += testemitter-streaming.test
 TESTS += testemitter-restreaming.test
+if HAVE_GENERIC
+TESTS += testemitter-generic-failsafe.test
+endif
 
 if HAVE_LIBCLANG
 TESTS += testreflection.test

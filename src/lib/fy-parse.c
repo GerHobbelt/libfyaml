@@ -202,6 +202,7 @@ fy_token_queue_simple_internal(struct fy_parser *fyp, struct fy_token_list *fytl
 	fy_reader_fill_atom_end(fyr, &fyt->handle);
 
 	fy_input_ref(fyt->handle.fyi);
+	fyt->handle.token_atom = true;
 
 	fy_token_list_add_tail(fytl, fyt);
 
@@ -5869,6 +5870,7 @@ fy_parse_node(struct fy_parser *fyp, struct fy_token *fyt, bool is_block)
 		fytn->handle = fyt->handle;
 		fytn->handle.end_mark = fytn->handle.start_mark;	/* no extent */
 		fy_input_ref(fytn->handle.fyi);
+		fytn->handle.token_atom = true;
 
 		fye->sequence_start.sequence_start = fytn;
 
@@ -6342,19 +6344,25 @@ static struct fy_eventp *fy_parse_internal(struct fy_parser *fyp)
 		if (!(fyp->state == FYPS_IMPLICIT_DOCUMENT_START || had_doc_end || fyt->type == FYTT_DOCUMENT_START)) {
 			fyds = fyp->current_document_state;
 
-			/* not BLOCK_MAPPING_START */
-			FYP_TOKEN_ERROR_CHECK(fyp, fyt, FYEM_PARSE,
-					fyt->type == FYTT_BLOCK_MAPPING_START, err_out,
-					"missing document start");
+			/* special error handling for BLOCK_MAPPING_START */
+			if (fyt->type == FYTT_BLOCK_MAPPING_START) {
+				FYP_TOKEN_ERROR_CHECK(fyp, fyt, FYEM_PARSE,
+						fyds->start_implicit ||
+						fyds->start_mark.line != fy_token_start_line(fyt), err_out,
+						"invalid mapping starting at --- line");
 
-			FYP_TOKEN_ERROR_CHECK(fyp, fyt, FYEM_PARSE,
-					fyds->start_implicit ||
-					fyds->start_mark.line != fy_token_start_line(fyt), err_out,
-					"invalid mapping starting at --- line");
+				FYP_TOKEN_ERROR_CHECK(fyp, fyt, FYEM_PARSE,
+						false, err_out,
+						"invalid mapping in plain multiline");
 
-			FYP_TOKEN_ERROR_CHECK(fyp, fyt, FYEM_PARSE,
-					false, err_out,
-					"invalid mapping in plain multiline");
+			} else {
+				/* not BLOCK_MAPPING_START */
+				FYP_TOKEN_ERROR_CHECK(fyp, fyt, FYEM_PARSE,
+						(fyp->cfg.flags & FYPCF_RELAXED_FLOW_DOC) &&
+							(fyt->type == FYTT_FLOW_MAPPING_START ||
+							 fyt->type == FYTT_FLOW_SEQUENCE_START), err_out,
+						"missing document start");
+			}
 		}
 
 		fym = fy_token_start_mark(fyt);
@@ -6383,6 +6391,7 @@ static struct fy_eventp *fy_parse_internal(struct fy_parser *fyp)
 					"missing required document start indicator after directives");
 
 			fy_parse_state_set(fyp, FYPS_BLOCK_NODE);
+
 		} else {
 			fye->document_start.document_start = fy_scan_remove(fyp, fyt);
 
@@ -6610,6 +6619,7 @@ static struct fy_eventp *fy_parse_internal(struct fy_parser *fyp)
 			fytn->handle = fyt->handle;
 			fytn->handle.end_mark = fytn->handle.start_mark;	/* no extent */
 			fy_input_ref(fytn->handle.fyi);
+			fytn->handle.token_atom = true;
 
 			fye->sequence_end.sequence_end = fytn;
 		} else
@@ -6888,6 +6898,7 @@ static struct fy_eventp *fy_parse_internal(struct fy_parser *fyp)
 		fytn->handle = fyt->handle;
 		fytn->handle.end_mark = fytn->handle.start_mark;	/* no extent */
 		fy_input_ref(fytn->handle.fyi);
+		fytn->handle.token_atom = true;
 
 		fye->mapping_end.mapping_end = fytn;
 

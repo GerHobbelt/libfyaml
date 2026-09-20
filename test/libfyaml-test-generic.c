@@ -2790,13 +2790,6 @@ static fy_generic test_map_double2(struct fy_generic_builder *gb, fy_generic v)
 	return fy_value(j);
 }
 
-static fy_generic test_map_filter_double_if_over_10(struct fy_generic_builder *gb, fy_generic v)
-{
-	int iv;
-	iv = fy_cast(v, 0);
-	return iv >= 10 ? fy_value(gb, iv * 2) : fy_invalid;
-}
-
 static fy_generic test_map_prefix_str(struct fy_generic_builder *gb, fy_generic v)
 {
 	/* verify that export to the builder works */
@@ -4303,6 +4296,155 @@ START_TEST(parse_emit_ops)
 }
 END_TEST
 
+START_TEST(generic_failsafe_schema_preserves_empty_scalars)
+{
+	char buf[16384];
+	struct fy_generic_builder *gb;
+	fy_generic parsed, value, seq, item;
+
+	gb = fy_generic_builder_create_in_place(FYGBCF_SCHEMA_YAML1_2_FAILSAFE | FYGBCF_SCOPE_LEADER,
+			NULL, buf, sizeof(buf));
+	ck_assert_ptr_ne(gb, NULL);
+
+	parsed = fy_parse(gb,
+			  "a:\n"
+			  "seq:\n"
+			  "  - \n",
+			  FYOPPF_DISABLE_DIRECTORY | FYOPPF_INPUT_TYPE_STRING, NULL);
+	ck_assert(fy_generic_is_valid(parsed));
+
+	value = fy_get(parsed, "a", fy_invalid);
+	ck_assert(fy_generic_is_string(value));
+	ck_assert_str_eq(fy_cast(value, ""), "");
+
+	seq = fy_get(parsed, "seq", fy_invalid);
+	ck_assert(fy_generic_is_sequence(seq));
+	item = fy_get(seq, 0, fy_invalid);
+	ck_assert(fy_generic_is_string(item));
+	ck_assert_str_eq(fy_cast(item, ""), "");
+}
+END_TEST
+
+static void do_generic_resolved_parse_drops_anchors(enum fy_op_emit_flags extra_emit_flags)
+{
+	char buf[65536];
+	struct fy_generic_builder *gb;
+	fy_generic parsed;
+	fy_generic emitted;
+	const char *emitted_str;
+	const char *expected = "a: b\nc: b\nd: e\n";
+
+	gb = fy_generic_builder_create_in_place(FYGBCF_SCHEMA_AUTO | FYGBCF_SCOPE_LEADER, NULL,
+			buf, sizeof(buf));
+	ck_assert_ptr_ne(gb, NULL);
+
+	parsed = fy_gb_parse(gb,
+			     "a: &anchor b\n"
+			     "c: *anchor\n"
+			     "d: e\n",
+			     FYOPPF_DISABLE_DIRECTORY |
+			     FYOPPF_INPUT_TYPE_STRING,
+			     NULL);
+	ck_assert(fy_generic_is_valid(parsed));
+
+	emitted = fy_gb_emit(gb, parsed,
+			     FYOPEF_DISABLE_DIRECTORY |
+			     FYOPEF_MODE_YAML_1_2 |
+			     FYOPEF_STYLE_BLOCK |
+			     extra_emit_flags,
+			     NULL);
+	ck_assert(fy_generic_is_string(emitted));
+
+	emitted_str = fy_cast(emitted, "");
+	ck_assert_str_eq(emitted_str, expected);
+	ck_assert_ptr_eq(strstr(emitted_str, "&anchor"), NULL);
+	ck_assert_ptr_eq(strstr(emitted_str, "*anchor"), NULL);
+}
+
+START_TEST(generic_resolved_parse_drops_anchors_encoder)
+{
+	do_generic_resolved_parse_drops_anchors(0);
+}
+END_TEST
+
+static void do_generic_emit_preserves_document_markers(enum fy_op_emit_flags extra_emit_flags)
+{
+	char buf[65536];
+	struct fy_generic_builder *gb;
+	fy_generic parsed;
+	fy_generic emitted;
+	const char *emitted_str;
+	const char *yaml = "---\nfoo: bar\n---\nbaz: frooz\n...\n";
+
+	gb = fy_generic_builder_create_in_place(FYGBCF_SCHEMA_AUTO | FYGBCF_SCOPE_LEADER, NULL,
+			buf, sizeof(buf));
+	ck_assert_ptr_ne(gb, NULL);
+
+	parsed = fy_gb_parse(gb, yaml,
+			     FYOPPF_INPUT_TYPE_STRING | FYOPPF_MULTI_DOCUMENT,
+			     NULL);
+	ck_assert(fy_generic_is_valid(parsed));
+
+	emitted = fy_gb_emit(gb, parsed,
+			     FYOPEF_MULTI_DOCUMENT |
+			     FYOPEF_MODE_YAML_1_2 |
+			     FYOPEF_STYLE_BLOCK |
+			     extra_emit_flags,
+			     NULL);
+	ck_assert(fy_generic_is_string(emitted));
+
+	emitted_str = fy_cast(emitted, "");
+	ck_assert_str_eq(emitted_str, yaml);
+}
+
+START_TEST(generic_emit_preserves_document_markers_encoder)
+{
+	do_generic_emit_preserves_document_markers(0);
+}
+END_TEST
+
+static void do_generic_emit_preserves_tag_directive_spelling(enum fy_op_emit_flags extra_emit_flags)
+{
+	char buf[65536];
+	struct fy_generic_builder *gb;
+	fy_generic parsed;
+	fy_generic emitted;
+	const char *emitted_str;
+	const char *yaml = "%TAG !e! tag:example.com,2024:\n---\n!e!thing foo\n";
+	const char *directive = "%TAG !e! tag:example.com,2024:\n";
+	const char *short_tag = "!e!thing";
+	const char *expanded_tag = "tag:example.com,2024:thing";
+
+	gb = fy_generic_builder_create_in_place(FYGBCF_SCHEMA_AUTO | FYGBCF_SCOPE_LEADER, NULL,
+			buf, sizeof(buf));
+	ck_assert_ptr_ne(gb, NULL);
+
+	parsed = fy_gb_parse(gb, yaml,
+			     FYOPPF_INPUT_TYPE_STRING | FYOPPF_MULTI_DOCUMENT,
+			     NULL);
+	ck_assert(fy_generic_is_valid(parsed));
+
+	emitted = fy_gb_emit(gb, parsed,
+			     FYOPEF_MULTI_DOCUMENT |
+			     FYOPEF_MODE_YAML_1_2 |
+			     FYOPEF_STYLE_BLOCK |
+			     extra_emit_flags,
+			     NULL);
+	ck_assert(fy_generic_is_string(emitted));
+
+	emitted_str = fy_cast(emitted, "");
+	(void)yaml;
+	ck_assert_ptr_ne(strstr(emitted_str, directive), NULL);
+	ck_assert_ptr_ne(strstr(emitted_str, short_tag), NULL);
+	ck_assert_ptr_eq(strstr(emitted_str, expanded_tag), NULL);
+}
+
+START_TEST(generic_emit_preserves_tag_directive_spelling_encoder)
+{
+	do_generic_emit_preserves_tag_directive_spelling(0);
+}
+END_TEST
+
 START_TEST(generic_document_builder_pull_mode)
 {
 	char buf[65536];
@@ -5720,6 +5862,10 @@ void libfyaml_case_generic(struct fy_check_suite *cs)
 
 	/* parse and emit operations */
 	fy_check_testcase_add_test(ctc, parse_emit_ops);
+	fy_check_testcase_add_test(ctc, generic_failsafe_schema_preserves_empty_scalars);
+	fy_check_testcase_add_test(ctc, generic_resolved_parse_drops_anchors_encoder);
+	fy_check_testcase_add_test(ctc, generic_emit_preserves_document_markers_encoder);
+	fy_check_testcase_add_test(ctc, generic_emit_preserves_tag_directive_spelling_encoder);
 	fy_check_testcase_add_test(ctc, generic_document_builder_pull_mode);
 	fy_check_testcase_add_test(ctc, generic_document_builder_push_mode_metadata);
 	fy_check_testcase_add_test(ctc, generic_document_builder_directory_mode);

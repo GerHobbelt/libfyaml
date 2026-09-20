@@ -28,6 +28,7 @@
 #include "fy-generic.h"
 
 #include "fy-docstate.h"
+#include "fy-emit.h"
 #include "fy-input.h"
 
 int fy_generic_iterator_setup(struct fy_generic_iterator *fygi, const struct fy_generic_iterator_cfg *cfg)
@@ -37,7 +38,11 @@ int fy_generic_iterator_setup(struct fy_generic_iterator *fygi, const struct fy_
 	if (cfg)
 		fygi->cfg = *cfg;
 
+	if (cfg && !fy_generic_schema_is_valid(cfg->schema))
+		return -1;
+
 	fygi->state = FYGIS_WAITING_STREAM_START;
+	fygi->schema = cfg ? cfg->schema : FYGS_AUTO;
 	fygi->vds = fy_invalid;
 	fygi->iterate_root = fy_invalid;
 	fygi->idx = (size_t)-1;
@@ -110,6 +115,7 @@ void fy_generic_iterator_cleanup(struct fy_generic_iterator *fygi)
 		fy_eventp_free(fyep);
 
 	fygi->state = FYGIS_WAITING_STREAM_START;
+	fygi->schema = FYGS_AUTO;
 	fygi->vds = fy_invalid;
 	fygi->iterate_root = fy_invalid;
 	fygi->idx = 0;
@@ -151,12 +157,292 @@ void fy_generic_iterator_destroy(struct fy_generic_iterator *fygi)
 }
 
 static struct fy_token *
-fygi_create_token(struct fy_generic_iterator *fygi, fy_generic v, enum fy_token_type type)
+fygi_create_token(struct fy_generic_iterator *fygi, fy_generic v,
+		  enum fy_token_type type, enum fy_scalar_style style)
 {
 	if (!fygi)
 		return NULL;
 
-	return fy_document_state_generic_create_token(fygi->fyds, v, type);
+	return fy_document_state_generic_create_token(fygi->fyds, v, type, style);
+}
+
+struct fygi_fast_event_data {
+	fy_generic_indirect gi;
+	fy_generic v;
+	const char *anchor;
+	const char *tag;
+	const char *comment;
+	int style;
+	char tag_buf_local[128];
+	char *tag_buf_alloc;
+} FY_GENERIC_CONTAINER_ALIGNMENT;
+
+static void
+fygi_fast_event_get_data(struct fy_generic_iterator *fygi, struct fy_emitter *emit,
+			 fy_generic v,
+			 struct fygi_fast_event_data *gd)
+{
+	memset(gd, 0, sizeof(*gd));
+	gd->style = -1;
+	gd->v = v;
+
+	if (fy_generic_is_direct(v))
+		return;
+
+	fy_generic_indirect_get(v, &gd->gi);
+	if (fy_generic_get_type(v) != FYGT_ALIAS && fy_generic_is_valid(gd->gi.value))
+		gd->v = gd->gi.value;
+
+	if (fygi->cfg.flags & FYGICF_STRIP_LABELS)
+		gd->gi.anchor = fy_invalid;
+	if (fygi->cfg.flags & FYGICF_STRIP_TAGS)
+		gd->gi.tag = fy_invalid;
+	if (fygi->cfg.flags & FYGICF_STRIP_COMMENTS)
+		gd->gi.comment = fy_invalid;
+	if (fygi->cfg.flags & FYGICF_STRIP_STYLE)
+		gd->gi.style = fy_invalid;
+	if (fygi->cfg.flags & FYGICF_STRIP_FAILSAFE_STR)
+		gd->gi.failsafe_str = fy_invalid;
+
+	gd->anchor = fy_castp(&gd->gi.anchor, (const char *)NULL);
+	gd->tag = fy_castp(&gd->gi.tag, (const char *)NULL);
+	gd->comment = fy_castp(&gd->gi.comment, (const char *)NULL);
+	gd->style = fy_cast(gd->gi.style, -1);
+
+	if (gd->tag) {
+		struct fy_document_state *fyds;
+		size_t formatted_tag_size;
+
+		fyds = fy_emitter_get_document_state(emit);
+		formatted_tag_size = fy_document_state_format_tag(
+				fyds, gd->tag, FY_NT,
+				gd->tag_buf_local, sizeof(gd->tag_buf_local));
+		if (formatted_tag_size < sizeof(gd->tag_buf_local))
+			gd->tag = gd->tag_buf_local;
+		else {
+			gd->tag_buf_alloc =
+				fy_document_state_format_tag_alloc(
+					fyds, gd->tag, FY_NT, NULL);
+			if (gd->tag_buf_alloc)
+				gd->tag = gd->tag_buf_alloc;
+		}
+	}
+}
+
+static void
+fygi_fast_event_cleanup_data(struct fygi_fast_event_data *gd)
+{
+	if (!gd)
+		return;
+	if (gd->tag_buf_alloc)
+		free(gd->tag_buf_alloc);
+}
+
+static int
+fygi_fast_event_attach_comments(struct fygi_fast_event_data *gd,
+				struct fy_event *fye)
+{
+	struct fy_token *fyt;
+
+	if (!fye)
+		return -1;
+
+	if (!gd->comment)
+		return 0;
+
+	fyt = fy_event_get_token(fye);
+	if (!fyt)
+		return -1;
+
+	return fy_token_set_comment(fyt, fycp_top, gd->comment, FY_NT);
+}
+
+static enum fy_generic_schema
+fygi_get_document_schema(struct fy_generic_iterator *fygi, fy_generic vds)
+{
+	enum fy_generic_schema schema;
+	const char *schema_txt;
+
+	if (!fygi)
+		return FYGS_AUTO;
+
+	schema = fygi->cfg.schema;
+	if (fy_generic_is_mapping(vds)) {
+		schema_txt = fy_get(vds, "schema", (const char *)NULL);
+		if (schema_txt) {
+			schema = fy_generic_schema_from_text(schema_txt);
+			if (!fy_generic_schema_is_valid(schema))
+				schema = fygi->cfg.schema;
+		}
+	}
+
+	return fy_generic_schema_is_valid(schema) ? schema : FYGS_AUTO;
+}
+
+static bool
+fygi_fast_scalar_text(fy_generic v, enum fy_generic_schema schema,
+		      const char **textp, size_t *szp,
+		      char *buf, size_t buf_size, char **allocp)
+{
+	enum fy_generic_type type;
+	fy_generic_sized_string szstr;
+	fy_generic_decorated_int dint;
+	double f;
+	int len;
+	bool bv;
+
+	if (!textp || !szp || !buf || !buf_size || !allocp)
+		return false;
+
+	*allocp = NULL;
+	type = fy_generic_get_type(v);
+
+	switch (type) {
+	case FYGT_NULL:
+		*textp = schema == FYGS_PYTHON ? "None" : "null";
+		*szp = 4;
+		return true;
+
+	case FYGT_BOOL:
+		bv = fy_cast(v, (_Bool)false);
+		if (schema == FYGS_PYTHON) {
+			*textp = bv ? "True" : "False";
+			*szp = bv ? 4 : 5;
+		} else {
+			*textp = bv ? "true" : "false";
+			*szp = bv ? 4 : 5;
+		}
+		return true;
+
+	case FYGT_INT:
+		dint = fy_cast(v, fy_dint_empty);
+		if (!(dint.flags & FYGDIF_UNSIGNED_RANGE_EXTEND))
+			len = snprintf(buf, buf_size, "%lld", dint.sv);
+		else
+			len = snprintf(buf, buf_size, "%llu", dint.uv);
+		break;
+
+	case FYGT_FLOAT:
+		f = fy_cast(v, (double)NAN);
+		if (isfinite(f))
+			len = snprintf(buf, buf_size, "%g", f);
+		else if (isnan(f))
+			len = snprintf(buf, buf_size, ".nan");
+		else if (isinf(f) > 0)
+			len = snprintf(buf, buf_size, ".inf");
+		else
+			len = snprintf(buf, buf_size, "-.inf");
+		break;
+
+	case FYGT_STRING:
+		szstr = fy_cast(v, fy_szstr_empty);
+		if (szstr.size < buf_size) {
+			if (szstr.size)
+				memcpy(buf, szstr.data, szstr.size);
+			buf[szstr.size] = '\0';
+			*textp = buf;
+		} else {
+			*allocp = malloc(szstr.size + 1);
+			if (!*allocp)
+				return false;
+			memcpy(*allocp, szstr.data, szstr.size);
+			(*allocp)[szstr.size] = '\0';
+			*textp = *allocp;
+		}
+		*szp = szstr.size;
+		return true;
+
+	default:
+		return false;
+	}
+
+	if (len < 0 || (size_t)len >= buf_size)
+		return false;
+
+	*textp = buf;
+	*szp = (size_t)len;
+	return true;
+}
+
+static struct fy_event *
+fygi_emit_event_create(struct fy_generic_iterator *fygi, struct fy_emitter *emit,
+		       fy_generic v, bool start)
+{
+	struct fygi_fast_event_data gd_local, *gd = &gd_local;
+	struct fy_event *fye = NULL;
+	enum fy_generic_type type;
+	enum fy_scalar_style ss;
+	enum fy_collection_style cs;
+	enum fy_node_style ns;
+	const char *text;
+	char buf[32];
+	char *text_alloc = NULL;
+	size_t sz;
+
+	if (!fygi || !emit)
+		return NULL;
+
+	type = fy_generic_get_type(v);
+
+	if (fy_generic_type_is_collection(type) && !start)
+		return fy_emit_event_create(emit, type == FYGT_SEQUENCE ?
+				FYET_SEQUENCE_END : FYET_MAPPING_END);
+
+	fygi_fast_event_get_data(fygi, emit, v, gd);
+	v = gd->v;
+	type = fy_generic_get_type(v);
+
+	switch (type) {
+	case FYGT_NULL:
+	case FYGT_BOOL:
+	case FYGT_INT:
+	case FYGT_FLOAT:
+	case FYGT_STRING:
+		ss = FYSS_ANY;
+		if (gd->style >= 0 && gd->style < FYSS_MAX)
+			ss = (enum fy_scalar_style)gd->style;
+		if (type != FYGT_STRING)
+			ss = FYSS_PLAIN;
+		if (!fygi_fast_scalar_text(v, fygi->schema, &text, &sz,
+					   buf, sizeof(buf), &text_alloc))
+			break;
+		fye = fy_emit_event_create(emit, FYET_SCALAR, ss,
+				text, sz, gd->anchor, gd->tag);
+		free(text_alloc);
+		break;
+
+	case FYGT_SEQUENCE:
+	case FYGT_MAPPING:
+		ns = FYNS_ANY;
+		if (gd->style >= 0 && gd->style < FYCS_MAX) {
+			cs = (enum fy_collection_style)gd->style;
+			if (cs == FYCS_FLOW)
+				ns = FYNS_FLOW;
+			else if (cs == FYCS_BLOCK)
+				ns = FYNS_BLOCK;
+		}
+		fye = fy_emit_event_create(emit, type == FYGT_SEQUENCE ?
+				FYET_SEQUENCE_START : FYET_MAPPING_START,
+				ns, gd->anchor, gd->tag);
+		break;
+
+	case FYGT_ALIAS:
+		text = fy_generic_get_alias_alloca(v);
+		if (text && *text)
+			fye = fy_emit_event_create(emit, FYET_ALIAS, text);
+		break;
+
+	default:
+		break;
+	}
+
+	(void)fygi_fast_event_attach_comments(gd, fye);
+	fygi_fast_event_cleanup_data(gd);
+
+	if (!fye)
+		fygi->state = FYGIS_ERROR;
+
+	return fye;
 }
 
 static struct fy_event *
@@ -169,7 +455,10 @@ fygi_event_create(struct fy_generic_iterator *fygi, fy_generic v, bool start)
 	struct fy_token *anchor = NULL;
 	fy_generic_indirect gi;
 	enum fy_generic_type type;
+	enum fy_collection_style cstyle;
+	enum fy_scalar_style sstyle;
 	enum fy_token_type ttype;
+	bool has_style, has_comment;
 	int rc;
 
 	fyep = fy_generic_iterator_eventp_alloc(fygi);
@@ -194,30 +483,48 @@ fygi_event_create(struct fy_generic_iterator *fygi, fy_generic v, bool start)
 	if (fygi->cfg.flags & FYGICF_STRIP_FAILSAFE_STR)
 		gi.failsafe_str = fy_invalid;
 
+
+	has_style = fy_generic_is_int_type(gi.style);
+	has_comment = fy_generic_is_string(gi.comment);
+
+	cstyle = FYCS_ANY;
+	sstyle = FYSS_ANY;
+	if (has_style) {
+		if (fy_generic_type_is_scalar(type))
+			sstyle = fy_cast(gi.style, FYSS_ANY);
+		else if (fy_generic_type_is_collection(type))
+			cstyle = fy_cast(gi.style, FYCS_ANY);
+	}
+
 	if (fy_generic_is_string(gi.anchor))
-		anchor = fygi_create_token(fygi, gi.anchor, FYTT_ANCHOR);
+		anchor = fygi_create_token(fygi, gi.anchor, FYTT_ANCHOR, FYSS_ANY);
 
 	if (fy_generic_is_string(gi.tag))
-		tag = fygi_create_token(fygi, gi.tag, FYTT_TAG);
+		tag = fygi_create_token(fygi, gi.tag, FYTT_TAG, FYSS_ANY);
 
 	fyt = NULL;
 	if (fy_generic_type_is_scalar(type) || type == FYGT_ALIAS) {
-
-		fyt = fygi_create_token(fygi, v, type != FYGT_ALIAS ? FYTT_SCALAR : FYTT_ALIAS);
+		fyt = fygi_create_token(fygi, v,
+					type != FYGT_ALIAS ? FYTT_SCALAR : FYTT_ALIAS,
+					sstyle);
 		if (!fyt)
 			goto err_out;
 
-	} else if (fy_generic_type_is_collection(type) && fy_generic_is_valid(gi.comment)) {
+	} else if (fy_generic_type_is_collection(type) && (has_style || has_comment)) {
 
 		ttype = type == FYGT_SEQUENCE ?
-			(start ? FYTT_FLOW_SEQUENCE_START : FYTT_FLOW_SEQUENCE_END) :
-			(start ? FYTT_FLOW_MAPPING_START : FYTT_FLOW_MAPPING_END);
+			(start ?
+				(cstyle == FYCS_FLOW ? FYTT_FLOW_SEQUENCE_START : FYTT_BLOCK_SEQUENCE_START) :
+				FYTT_FLOW_SEQUENCE_END) :
+			(start ?
+				(cstyle == FYCS_FLOW ? FYTT_FLOW_MAPPING_START : FYTT_BLOCK_MAPPING_START) :
+				FYTT_FLOW_MAPPING_END);
 		fyt = fy_token_create(ttype, NULL, 0);
 		if (!fyt)
 			goto err_out;
 	}
 
-	if (fyt && fy_generic_is_string(gi.comment)) {
+	if (has_comment && fyt) {
 		rc = fy_token_set_comment(fyt, fycp_top, fy_castp(&gi.comment, ""), FY_NT);
 		if (rc)
 			goto err_out;
@@ -372,7 +679,7 @@ fy_generic_iterator_document_start_internal(struct fy_generic_iterator *fygi)
 	fye->type = FYET_DOCUMENT_START;
 	fye->document_start.document_start = NULL;
 	fye->document_start.document_state = fy_document_state_ref(fygi->fyds);
-	fye->document_start.implicit = true;
+	fye->document_start.implicit = fy_document_state_start_implicit(fygi->fyds);
 
 	/* and go into body */
 	fygi->state = FYGIS_WAITING_BODY_START_OR_DOCUMENT_END;
@@ -394,6 +701,7 @@ fy_generic_iterator_document_start(struct fy_generic_iterator *fygi, fy_generic 
 	fygi->vds = vds;
 	if (fy_generic_is_invalid(fygi->vds))
 		goto err_out;
+	fygi->schema = fygi_get_document_schema(fygi, fygi->vds);
 	fygi->iterate_root = fy_generic_vds_get_root(fygi->vds);
 	if (fy_generic_is_invalid(fygi->iterate_root))
 		goto err_out;
@@ -420,7 +728,8 @@ fy_generic_iterator_document_end(struct fy_generic_iterator *fygi)
 	if (fy_generic_is_invalid(fygi->vds) || fygi->state != FYGIS_WAITING_DOCUMENT_END)
 		goto err_out;
 
-	fye = fy_generic_iterator_event_create(fygi, FYET_DOCUMENT_END, (int)1);
+	fye = fy_generic_iterator_event_create(fygi, FYET_DOCUMENT_END,
+			fy_document_state_end_implicit(fygi->fyds) ? 1 : 0);
 	if (!fye)
 		goto err_out;
 
@@ -602,7 +911,9 @@ err_out:
 	return false;
 }
 
-struct fy_event *fy_generic_iterator_body_next(struct fy_generic_iterator *fygi)
+static struct fy_event *
+fy_generic_iterator_body_next_internal_emit(struct fy_generic_iterator *fygi,
+					    struct fy_emitter *emit)
 {
 	struct fy_generic_iterator_body_result res;
 
@@ -612,7 +923,15 @@ struct fy_event *fy_generic_iterator_body_next(struct fy_generic_iterator *fygi)
 	if (!fy_generic_iterator_body_next_internal(fygi, &res))
 		return NULL;
 
+	if (emit)
+		return fygi_emit_event_create(fygi, emit, res.v, !res.end);
+
 	return fygi_event_create(fygi, res.v, !res.end);
+}
+
+struct fy_event *fy_generic_iterator_body_next(struct fy_generic_iterator *fygi)
+{
+	return fy_generic_iterator_body_next_internal_emit(fygi, NULL);
 }
 
 void
@@ -659,7 +978,7 @@ bool fy_generic_iterator_get_error(struct fy_generic_iterator *fygi)
 }
 
 struct fy_event *
-fy_generic_iterator_generate_next(struct fy_generic_iterator *fygi)
+fy_generic_iterator_generate_emit_next(struct fy_generic_iterator *fygi, struct fy_emitter *emit)
 {
 	struct fy_event *fye = NULL;
 	int rc;
@@ -687,6 +1006,16 @@ fy_generic_iterator_generate_next(struct fy_generic_iterator *fygi)
 		return fye;
 	}
 
+	/* wants document events without stream events */
+	if (!(fygi->generator_state & FYGIGF_WANTS_STREAM) &&
+	    fygi->idx == (size_t)-1) {
+		rc = fy_generic_dir_get_document_count(fygi->cfg.vdir);
+		fygi->count = rc >= 1 ? (size_t)rc : 0;
+		fygi->idx = 0;
+		fygi->vds = fy_invalid;
+		fygi->iterate_root = fy_invalid;
+	}
+
 	/* wants document events and not generated yet */
 	if (fygi->idx < fygi->count &&
 	   (fygi->generator_state & (FYGIGF_WANTS_DOC | FYGIGF_GENERATED_DS)) == FYGIGF_WANTS_DOC) {
@@ -694,6 +1023,7 @@ fy_generic_iterator_generate_next(struct fy_generic_iterator *fygi)
 		fygi->vds = fy_generic_dir_get_document_vds(fygi->cfg.vdir, fygi->idx);
 		if (fy_generic_is_invalid(fygi->vds))
 			goto err_out;
+		fygi->schema = fygi_get_document_schema(fygi, fygi->vds);
 
 		fygi->iterate_root = fy_generic_vds_get_root(fygi->vds);
 		if (fy_generic_is_invalid(fygi->iterate_root))
@@ -713,7 +1043,7 @@ fy_generic_iterator_generate_next(struct fy_generic_iterator *fygi)
 	/* generate body events... */
 	if (fy_generic_is_valid(fygi->iterate_root) &&
 	    !(fygi->generator_state & FYGIGF_GENERATED_BODY)) {
-		fye = fy_generic_iterator_body_next(fygi);
+		fye = fy_generic_iterator_body_next_internal_emit(fygi, emit);
 		if (fye)
 			return fye;
 
@@ -753,4 +1083,10 @@ fy_generic_iterator_generate_next(struct fy_generic_iterator *fygi)
 err_out:
 	fygi->state = FYGIS_ERROR;
 	return NULL;
+}
+
+struct fy_event *
+fy_generic_iterator_generate_next(struct fy_generic_iterator *fygi)
+{
+	return fy_generic_iterator_generate_emit_next(fygi, NULL);
 }

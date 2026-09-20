@@ -3109,6 +3109,12 @@ fy_generic_op_parse(const struct fy_generic_op_desc *desc FY_UNUSED,
 	if (!(parse_flags & FYOPPF_DONT_RESOLVE))
 		parse_cfg.flags |= FYPCF_RESOLVE_DOCUMENT;
 
+	if (parse_flags & FYOPPF_SLOPPY_FLOW_INDENTATION)
+		parse_cfg.flags |= FYPCF_SLOPPY_FLOW_INDENTATION;
+
+	if (parse_flags & FYOPPF_RELAXED_FLOW_DOC)
+		parse_cfg.flags |= FYPCF_RELAXED_FLOW_DOC;
+
 	parse_cfg.flags &= ~(FYPCF_DEFAULT_VERSION(FYPCF_DEFAULT_VERSION_MASK) |
 			     FYPCF_JSON(FYPCF_JSON_MASK));
 
@@ -3329,7 +3335,7 @@ fy_generic_op_emit(const struct fy_generic_op_desc *desc FY_UNUSED,
 	emit_flags = args->emit.flags;
 
 	/* try to output something pretty */
-	emit_cfg_flags = FYECF_WIDTH_INF | FYECF_STRIP_DOC | FYECF_STRIP_LABELS;
+	emit_cfg_flags = FYECF_WIDTH_INF;
 	emit_cfg_xflags = FYEXCF_COLOR_AUTO;
 
 	emit_cfg_flags &= ~(FYECF_MODE(FYECF_MODE_MASK) |
@@ -3512,7 +3518,7 @@ fy_generic_op_emit(const struct fy_generic_op_desc *desc FY_UNUSED,
 		encoder_emit_flags |= FYGEEF_TRACE;
 
 	/* Emit the value */
-	rc = fy_generic_encoder_emit(fyge, encoder_emit_flags | FYGEEF_TRACE, in);
+	rc = fy_generic_encoder_emit(fyge, encoder_emit_flags, in);
 	if (rc)
 		goto err_out;
 

@@ -590,7 +590,17 @@ fygdb_create_scalar(struct fy_generic_document_builder *fygdb, struct fy_event *
 					  "invalid scalar created");
 		}
 	} else {
+		bool coerce_explicit_tag = true;
+
 		force_type = FYGT_STRING;
+		switch (fy_gb_get_schema(fygdb->cfg.gb)) {
+		case FYGS_YAML1_2_FAILSAFE:
+		case FYGS_YAML1_1_FAILSAFE:
+			coerce_explicit_tag = false;
+			break;
+		default:
+			break;
+		}
 
 		tag = fy_castp(&vt, "");
 		fygdb_error_check(fygdb, tag[0], err_out, "fy_cast() failed");
@@ -599,6 +609,8 @@ fygdb_create_scalar(struct fy_generic_document_builder *fygdb, struct fy_event *
 		p = strrchr(tag, ':');
 		if (!(p && (size_t)(p - tag) == yaml_tag_pfx_size &&
 		      !memcmp(tag, yaml_tag_pfx, yaml_tag_pfx_size)))
+			goto create_scalar;
+		if (!coerce_explicit_tag)
 			goto create_scalar;
 		sfx = p + 1;
 		if (!strcmp(sfx, "null"))
@@ -1323,7 +1335,9 @@ fy_generic_document_builder_process_event(struct fy_generic_document_builder *fy
 			return 0;
 		}
 
-		v = fygdb_create_scalar(fygdb, fye, va, vt, vcomment, vstyle,
+		v = fygdb_create_scalar(fygdb, fye,
+					fygdb->resolve ? fy_invalid : va,
+					vt, vcomment, vstyle,
 					vfailsafe_str, vmarker, &is_empty_plain_scalar);
 		fygdb_error_check(fygdb, fy_generic_is_valid(v), err_out,
 				  "fy_generic_document_builder scalar create failed");
@@ -1346,7 +1360,7 @@ fy_generic_document_builder_process_event(struct fy_generic_document_builder *fy
 		fygdb_error_check(fygdb, gdo, err_out, "fy_generic_decoder_object_alloc() failed");
 
 		gdo->type = fye->type == FYET_SEQUENCE_START ? FYGDOT_SEQUENCE : FYGDOT_MAPPING;
-		gdo->anchor = va;
+		gdo->anchor = fygdb->resolve ? fy_invalid : va;
 		gdo->tag = vt;
 		gdo->comment = vcomment;
 		gdo->style = vstyle;
