@@ -726,8 +726,11 @@ struct emit_bugs_collect_data {
 	char *buf;
 };
 
-static int emit_bugs_collect_output(struct fy_emitter *emit, enum fy_emitter_write_type type,
-				    const char *str, int len, void *userdata)
+static int emit_bugs_collect_output(struct fy_emitter *emit FY_UNUSED,
+				    enum fy_emitter_write_type type FY_UNUSED,
+				    const char *str,
+				    int len,
+				    void *userdata)
 {
 	struct emit_bugs_collect_data *data = userdata;
 	char *newbuf;
@@ -913,6 +916,176 @@ START_TEST(emit_bug_folded_more_indented_roundtrip)
 }
 END_TEST
 
+/* ═══ Bug 16: fy_emit_token_write_folded_original emits spurious blank line ═══ */
+
+START_TEST(emit_bug_folded_clip_no_trailing_blank)
+{
+    /* >  (clip): roundtrip must not add a blank line after the scalar */
+    static const char input[] =
+        "key: >\n"
+        "  content line\n"
+        "other: value\n";
+    char *got = roundtrip_doc(input);
+    ck_assert_ptr_ne(got, NULL);
+    ck_assert_str_eq(got, input);
+    free(got);
+}
+END_TEST
+
+START_TEST(emit_bug_folded_strip_no_trailing_blank)
+{
+    /* >- (strip): roundtrip must not add a blank line after the scalar */
+    static const char input[] =
+        "key: >-\n"
+        "  content line\n"
+        "other: value\n";
+    char *got = roundtrip_doc(input);
+    ck_assert_ptr_ne(got, NULL);
+    ck_assert_str_eq(got, input);
+    free(got);
+}
+END_TEST
+
+START_TEST(emit_bug_folded_keep_trailing_blank_preserved)
+{
+    /* >+ (keep): trailing blank lines must be preserved */
+    static const char input[] =
+        "key: >+\n"
+        "  content line\n"
+        "\n"
+        "other: value\n";
+    char *got = roundtrip_doc(input);
+    ck_assert_ptr_ne(got, NULL);
+    ck_assert_str_eq(got, input);
+    free(got);
+}
+END_TEST
+
+START_TEST(emit_bug_folded_mid_content_blank_preserved)
+{
+    /* mid-content blank lines must always be preserved regardless of chomp */
+    static const char input[] =
+        "key: >\n"
+        "  first line\n"
+        "\n"
+        "  second line\n"
+        "other: value\n";
+    char *got = roundtrip_doc(input);
+    ck_assert_ptr_ne(got, NULL);
+    ck_assert_str_eq(got, input);
+    free(got);
+}
+END_TEST
+
+/* ═══ Bug 17: fy_emit_token_write_literal extra newline for |+ ═══ */
+
+START_TEST(emit_bug_literal_keep_no_extra_newline)
+{
+    /* |+ (keep): trailing blank line must not cause extra newline before next element */
+    static const char input[] =
+        "key: |+\n"
+        "  content line\n"
+        "\n"
+        "other: value\n";
+    char *got = roundtrip_doc(input);
+    ck_assert_ptr_ne(got, NULL);
+    ck_assert_str_eq(got, input);
+    free(got);
+}
+END_TEST
+
+START_TEST(emit_bug_literal_keep_multiple_trailing_blanks)
+{
+    /* |+ with multiple trailing blank lines must all be preserved without extras */
+    static const char input[] =
+        "key: |+\n"
+        "  content line\n"
+        "\n"
+        "\n"
+        "other: value\n";
+    char *got = roundtrip_doc(input);
+    ck_assert_ptr_ne(got, NULL);
+    ck_assert_str_eq(got, input);
+    free(got);
+}
+END_TEST
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Bug 18: Trailing comments lost during parse→emit round-trip
+ *
+ * Comments appearing after the last entry in a mapping/sequence are
+ * silently dropped because the parser never attached them to any
+ * token.  The fix attaches them to BLOCK_END tokens.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* round-trip helper with comment parsing and output enabled */
+static char *roundtrip_doc_comments(const char *input)
+{
+	struct fy_document *fyd;
+	struct fy_parse_cfg cfg;
+	char *buf;
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.flags = FYPCF_PARSE_COMMENTS;
+
+	fyd = fy_document_build_from_string(&cfg, input, FY_NT);
+	if (!fyd)
+		return NULL;
+	buf = fy_emit_document_to_string(fyd, FYECF_DEFAULT | FYECF_OUTPUT_COMMENTS);
+	fy_document_destroy(fyd);
+	return buf;
+}
+
+START_TEST(emit_bug_trailing_comment_mapping)
+{
+	const char input[] = "key: value\n# trailing\n";
+	char *buf = roundtrip_doc_comments(input);
+	ck_assert_ptr_ne(buf, NULL);
+	ck_assert_str_eq(buf, input);
+	free(buf);
+}
+END_TEST
+
+START_TEST(emit_bug_trailing_comment_sequence)
+{
+	const char input[] = "items:\n- a\n# after last item\n";
+	char *buf = roundtrip_doc_comments(input);
+	ck_assert_ptr_ne(buf, NULL);
+	ck_assert_str_eq(buf, input);
+	free(buf);
+}
+END_TEST
+
+START_TEST(emit_bug_trailing_comment_nested)
+{
+	const char input[] = "outer:\n  inner: value\n  # comment\nnext: val\n";
+	char *buf = roundtrip_doc_comments(input);
+	ck_assert_ptr_ne(buf, NULL);
+	ck_assert_str_eq(buf, input);
+	free(buf);
+}
+END_TEST
+
+START_TEST(emit_bug_trailing_comment_multiline)
+{
+	const char input[] = "key: value\n# line 1\n# line 2\n";
+	char *buf = roundtrip_doc_comments(input);
+	ck_assert_ptr_ne(buf, NULL);
+	ck_assert_str_eq(buf, input);
+	free(buf);
+}
+END_TEST
+
+START_TEST(emit_bug_trailing_comment_eof_mapping)
+{
+	const char input[] = "key: value\n# eof\n";
+	char *buf = roundtrip_doc_comments(input);
+	ck_assert_ptr_ne(buf, NULL);
+	ck_assert_str_eq(buf, input);
+	free(buf);
+}
+END_TEST
+
 /* ── registration ────────────────────────────────────────────────── */
 
 void libfyaml_case_emit_bugs(struct fy_check_suite *cs)
@@ -994,4 +1167,21 @@ void libfyaml_case_emit_bugs(struct fy_check_suite *cs)
 	fy_check_testcase_add_test(ctc, emit_bug_folded_keep_roundtrip);
 	fy_check_testcase_add_test(ctc, emit_bug_folded_blank_lines_roundtrip);
 	fy_check_testcase_add_test(ctc, emit_bug_folded_more_indented_roundtrip);
+
+	/* Bug 16: folded scalar spurious trailing blank line */
+	fy_check_testcase_add_test(ctc, emit_bug_folded_clip_no_trailing_blank);
+	fy_check_testcase_add_test(ctc, emit_bug_folded_strip_no_trailing_blank);
+	fy_check_testcase_add_test(ctc, emit_bug_folded_keep_trailing_blank_preserved);
+	fy_check_testcase_add_test(ctc, emit_bug_folded_mid_content_blank_preserved);
+
+	/* Bug 17: literal |+ extra trailing newline */
+	fy_check_testcase_add_test(ctc, emit_bug_literal_keep_no_extra_newline);
+	fy_check_testcase_add_test(ctc, emit_bug_literal_keep_multiple_trailing_blanks);
+
+	/* Bug 18: trailing comments lost during round-trip */
+	fy_check_testcase_add_test(ctc, emit_bug_trailing_comment_mapping);
+	fy_check_testcase_add_test(ctc, emit_bug_trailing_comment_sequence);
+	fy_check_testcase_add_test(ctc, emit_bug_trailing_comment_nested);
+	fy_check_testcase_add_test(ctc, emit_bug_trailing_comment_multiline);
+	fy_check_testcase_add_test(ctc, emit_bug_trailing_comment_eof_mapping);
 }

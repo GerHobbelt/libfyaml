@@ -21,6 +21,8 @@
 #include <libfyaml.h>
 
 #include "fy-win32.h"
+#include "fy-generic.h"
+
 #include "fy-parse.h"
 
 #include "fy-utils.h"
@@ -1042,7 +1044,9 @@ int fy_scan_comment(struct fy_parser *fyp, struct fy_atom *handle, bool single_l
 }
 
 bool
-fy_comment_atoms_seperated_by_ws(struct fy_parser *fyp, struct fy_atom *a, struct fy_atom *b)
+fy_comment_atoms_seperated_by_ws(struct fy_parser *fyp FY_UNUSED,
+				 struct fy_atom *a,
+				 struct fy_atom *b)
 {
 	struct fy_atom *tmpatom;
 	struct fy_atom inbetween;
@@ -1612,6 +1616,27 @@ int fy_parse_unroll_indent(struct fy_parser *fyp, int column)
 		fyp_error_check(fyp, !rc, err_out,
 				"fy_pop_indent() failed");
 
+		/* attach pending comment to this block-end token;
+		 * compute indent_delta relative to the parent indent
+		 * (after fy_pop_indent) so the emitter can pass old_indent
+		 * and get both correct comment column and trailing indent */
+		if ((fyp->cfg.flags & FYPCF_PARSE_COMMENTS) &&
+				fy_atom_is_set(&fyp->last_comment)) {
+
+			struct fy_atom *handle;
+			int ref_indent;
+
+			handle = fy_token_comment_handle(fyt, fycp_top, true);
+			if (handle) {
+				fy_input_unref(handle->fyi);
+				fy_atom_reset(handle);
+				*handle = fyp->last_comment;
+				ref_indent = fyp->indent > 0 ? fyp->indent : 0;
+				fy_atom_set_indent_delta(handle, (int)handle->start_mark.column - ref_indent);
+				fy_atom_reset(&fyp->last_comment);
+			}
+		}
+
 		/* the ident line has now moved */
 		fyp->indent_line = fyp_line(fyp);
 	}
@@ -1956,6 +1981,24 @@ int fy_fetch_stream_end(struct fy_parser *fyp)
 	fyt = fy_token_queue_simple(fyp, &fyp->queued_tokens, FYTT_STREAM_END, 0);
 	fyp_error_check(fyp, fyt, err_out,
 			"fy_token_queue_simple() failed");
+
+	/* attach any remaining trailing comment to stream end */
+	if ((fyp->cfg.flags & FYPCF_PARSE_COMMENTS) &&
+			fy_atom_is_set(&fyp->last_comment)) {
+
+		struct fy_atom *handle;
+		int ref_indent;
+
+		handle = fy_token_comment_handle(fyt, fycp_top, true);
+		if (handle) {
+			fy_input_unref(handle->fyi);
+			fy_atom_reset(handle);
+			*handle = fyp->last_comment;
+			ref_indent = fyp->indent > 0 ? fyp->indent : 0;
+			fy_atom_set_indent_delta(handle, (int)handle->start_mark.column - ref_indent);
+			fy_atom_reset(&fyp->last_comment);
+		}
+	}
 
 	return 0;
 
@@ -3463,9 +3506,15 @@ err_out_rc:
 	return rc;
 }
 
-int fy_scan_block_scalar_indent(struct fy_parser *fyp, int indent, int *breaks, int *breaks_length,
-				int *presentation_breaks_length, int *first_break_length, int *lastc,
-				int *max_indentp, bool first_scan)
+int fy_scan_block_scalar_indent(struct fy_parser *fyp,
+				int indent,
+				int *breaks,
+				int *breaks_length,
+				int *presentation_breaks_length,
+				int *first_break_length,
+				int *lastc,
+				int *max_indentp FY_UNUSED,
+				bool first_scan)
 {
 	int c, max_indent = 0, break_length, col;
 
@@ -4442,10 +4491,10 @@ struct fy_fetch_plain_state {
 static FY_ALWAYS_INLINE inline int
 fy_reader_fetch_plain_scalar_handle_inline(struct fy_reader *fyr, int c,
 					   const int indent, const int flow_level,
-					   struct fy_atom *handle,
+					   struct fy_atom *handle FY_UNUSED,
 					   const bool directive0,
 					   const enum fy_lb_mode lb_mode,
-					   const bool json_mode,
+					   const bool json_mode FY_UNUSED,
 					   struct fy_fetch_plain_state *state)
 {
 	int nextc, width;
@@ -7044,7 +7093,9 @@ const char *fy_event_type_get_text(enum fy_event_type type)
 
 #ifndef NDEBUG
 
-static void fy_parse_dump_eventp(struct fy_parser *fyp, struct fy_eventp *fyep, const char *pfx)
+static void fy_parse_dump_eventp(struct fy_parser *fyp,
+				 struct fy_eventp *fyep,
+				 const char *pfx FY_UNUSED)
 {
 	char *mbuf = NULL;
 
@@ -7065,7 +7116,12 @@ static void fy_parse_dump_eventp(struct fy_parser *fyp, struct fy_eventp *fyep, 
 
 #else
 static inline void
-fy_parse_dump_eventp(struct fy_parser *fyp, struct fy_eventp *fyep, const char *pfx) { }
+fy_parse_dump_eventp(struct fy_parser *fyp FY_UNUSED,
+		     struct fy_eventp *fyep FY_UNUSED,
+		     const char *pfx FY_UNUSED)
+{
+	return;
+}
 #endif
 
 struct fy_eventp *fy_parse_private(struct fy_parser *fyp)
@@ -7405,6 +7461,42 @@ err_out:
 err_out_rc:
 	return rc;
 }
+
+#ifdef HAVE_GENERIC
+int fy_parser_set_generic_iterator(struct fy_parser *fyp, enum fy_parser_event_generator_flags flags,
+				   struct fy_generic_iterator *fygi)
+{
+	struct fy_input_cfg fyic;
+	int rc;
+
+	if (!fyp || !fygi)
+		return -1;
+
+	memset(&fyic, 0, sizeof(fyic));
+
+	fyic.type = fyit_geniter;
+	fyic.geniter.flags = flags;
+	fyic.geniter.fygi = fygi;
+	fyic.geniter.owns_iterator = false;
+
+	/* must not be in the middle of something */
+	fyp_error_check(fyp, fyp->state == FYPS_NONE || fyp->state == FYPS_END,
+			err_out, "parser cannot be reset at state '%s'",
+				state_txt[fyp->state]);
+
+	fy_parse_input_reset(fyp);
+
+	rc = fy_parse_input_append(fyp, &fyic);
+	fyp_error_check(fyp, !rc, err_out_rc,
+			"fy_parse_input_append() failed");
+
+	return 0;
+err_out:
+	rc = -1;
+err_out_rc:
+	return rc;
+}
+#endif /* HAVE_GENERIC */
 
 int fy_parser_reset(struct fy_parser *fyp)
 {
@@ -8020,6 +8112,7 @@ static inline int
 fy_parse_streaming_alias_collection_state_set_top(struct fy_parser *fyp, int cts)
 {
 	int pos, off, old_cts;
+	uint32_t mask, bits;
 
 	if (fyp->cts.top < 2)
 		return -1;
@@ -8030,12 +8123,14 @@ fy_parse_streaming_alias_collection_state_set_top(struct fy_parser *fyp, int cts
 	pos = (fyp->cts.top - 2) / (sizeof(*fyp->cts.stack) * 8);
 	off = (fyp->cts.top - 2) % (sizeof(*fyp->cts.stack) * 8);
 
-	old_cts = (int)((fyp->cts.stack[pos] >> off) & 3);
+	old_cts = (int)((fyp->cts.stack[pos] >> off) & UINT32_C(3));
+	mask = UINT32_C(3) << off;
+	bits = ((uint32_t)cts & UINT32_C(3)) << off;
 
 	/* clear the bits first */
-	fyp->cts.stack[pos] &= ~(3 << off);
+	fyp->cts.stack[pos] &= ~mask;
 	/* set the state */
-	fyp->cts.stack[pos] |= (cts & 3) << off;
+	fyp->cts.stack[pos] |= bits;
 
 	return old_cts;
 }
@@ -8052,7 +8147,7 @@ fy_parse_streaming_alias_collection_state_top(struct fy_parser *fyp)
 	pos = (fyp->cts.top - 2) / (sizeof(*fyp->cts.stack) * 8);
 	off = (fyp->cts.top - 2) % (sizeof(*fyp->cts.stack) * 8);
 
-	return (int)((fyp->cts.stack[pos] >> off) & 3);
+	return (int)((fyp->cts.stack[pos] >> off) & UINT32_C(3));
 }
 
 static inline bool

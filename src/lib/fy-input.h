@@ -29,6 +29,7 @@
 
 struct fy_atom;
 struct fy_parser;
+struct fy_generic_iterator;
 
 enum fy_input_type {
 	fyit_file,
@@ -38,6 +39,7 @@ enum fy_input_type {
 	fyit_callback,
 	fyit_fd,
 	fyit_dociter,
+	fyit_geniter,
 };
 
 struct fy_input_cfg {
@@ -73,9 +75,13 @@ struct fy_input_cfg {
 		struct {
 			enum fy_parser_event_generator_flags flags;
 			struct fy_document_iterator *fydi;
-			struct fy_document *fyd;
 			bool owns_iterator;
 		} dociter;
+		struct {
+			enum fy_parser_event_generator_flags flags;
+			struct fy_generic_iterator *fygi;
+			bool owns_iterator;
+		} geniter;
 	};
 };
 
@@ -422,7 +428,7 @@ fy_reader_generates_events(const struct fy_reader *fyr)
 	if (!fyi)
 		return false;
 
-	return fyi->cfg.type == fyit_dociter;
+	return fyi->cfg.type == fyit_dociter || fyi->cfg.type == fyit_geniter;
 }
 
 struct fy_event *fy_reader_generate_next_event(struct fy_reader *fyr);
@@ -722,7 +728,7 @@ fy_reader_advance_octets(struct fy_reader *fyr, size_t advance)
 void fy_reader_advance_slow_path(struct fy_reader *fyr, int c);
 
 static FY_ALWAYS_INLINE inline void
-fy_reader_advance_printable_ascii(struct fy_reader *fyr, int c)
+fy_reader_advance_printable_ascii(struct fy_reader *fyr, int c FY_UNUSED)
 {
 	assert(fyr);
 	fy_reader_advance_octets(fyr, 1);

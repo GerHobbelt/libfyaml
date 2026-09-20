@@ -75,6 +75,7 @@ static const char *error_module_txt[] = {
 	[FYEM_TYPESET]			= "typeset",
 	[FYEM_DECODE]			= "decode",
 	[FYEM_ENCODE]			= "encode",
+	[FYEM_REFLECTION]		= "reflection",
 };
 
 const char *fy_error_module_to_string(enum fy_error_module module)
@@ -130,6 +131,7 @@ static const char *fy_error_module_str(enum fy_error_module module)
 		[FYEM_TYPESET]			= "TYPES",
 		[FYEM_DECODE]			= "DEC  ",
 		[FYEM_ENCODE]			= "ENC  ",
+		[FYEM_REFLECTION]		= "RFLCT",
 	};
 
 	if ((unsigned int)module >= FYEM_MAX)
@@ -168,7 +170,8 @@ void fy_diag_cfg_default(struct fy_diag_cfg *cfg)
 	cfg->colorize = isatty(fileno(stderr)) == 1;
 }
 
-void fy_diag_cfg_from_parser_flags(struct fy_diag_cfg *cfg, enum fy_parse_cfg_flags pflags)
+void fy_diag_cfg_from_parser_flags(struct fy_diag_cfg *cfg FY_UNUSED,
+				   enum fy_parse_cfg_flags pflags FY_UNUSED)
 {
 	/* nothing */
 }

@@ -797,7 +797,11 @@ static inline char *fy_alloca_vsprintf_impl(const char *fmt, va_list ap)
 #define _E8(...)	_E4(_E4(__VA_ARGS__))
 #define _E16(...)	_E8(_E8(__VA_ARGS__))
 #define _E32(...)	_E16(_E16(__VA_ARGS__))
+#if !defined(__SIZEOF_POINTER__) || __SIZEOF_POINTER__ >= 8
 #define _E(...)		_E32(_E32(__VA_ARGS__))
+#else
+#define _E(...)		_E16(_E16(__VA_ARGS__))
+#endif
 
 #define _FMT()
 #define _FP1(m) m _FMT()
@@ -1054,12 +1058,12 @@ static inline char *fy_alloca_vsprintf_impl(const char *fmt, va_list ap)
 #define FY_CPP_EVAL2(...)	FY_CPP_EVAL1(FY_CPP_EVAL1(__VA_ARGS__))
 #define FY_CPP_EVAL4(...)	FY_CPP_EVAL2(FY_CPP_EVAL2(__VA_ARGS__))
 #define FY_CPP_EVAL8(...)	FY_CPP_EVAL4(FY_CPP_EVAL4(__VA_ARGS__))
-#if !defined(__clang__)
-// gcc is better, goes to 16
+#if !defined(__clang__) && (!defined(__SIZEOF_POINTER__) || __SIZEOF_POINTER__ >= 8)
+// 64-bit gcc can afford the deeper expansion tree.
 #define FY_CPP_EVAL16(...)	FY_CPP_EVAL8(FY_CPP_EVAL8(__VA_ARGS__))
 #define FY_CPP_EVAL(...)	FY_CPP_EVAL16(FY_CPP_EVAL16(__VA_ARGS__))
 #else
-// clang craps out at 8
+// clang and 32-bit builds use a shallower expansion tree to keep cc1 memory use in check.
 #define FY_CPP_EVAL(...)	FY_CPP_EVAL8(FY_CPP_EVAL8(__VA_ARGS__))
 #endif
 
@@ -1263,11 +1267,14 @@ static inline char *fy_alloca_vsprintf_impl(const char *fmt, va_list ap)
  *   FY_DIAG_POP
  *
  * On compilers other than GCC/Clang all macros in this group expand to nothing.
+ * GCC releases before 13 also expand these to nothing because statement-form
+ * ``_Pragma()`` use at the current call sites is not accepted reliably enough
+ * for us to depend on it.
  */
 
 /* Compiler diagnostic helpers */
 
-#if defined(__clang__) || defined(__GNUC__)
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 13)
 /**
  * FY_DIAG_PUSH - Save the current diagnostic state onto the compiler's stack.
  *
@@ -1301,6 +1308,12 @@ static inline char *fy_alloca_vsprintf_impl(const char *fmt, va_list ap)
 #define FY_DIAG_IGNORE_UNUSED_PARAMETER \
 	_Pragma("GCC diagnostic ignored \"-Wunused-parameter\"")
 
+/**
+ * FY_DIAG_IGNORE_TYPE_LIMITS - Suppress ``-Wtype-limits`` in the current region.
+ */
+#define FY_DIAG_IGNORE_TYPE_LIMITS \
+	_Pragma("GCC diagnostic ignored \"-Wtype-limits\"")
+
 #else
 #define FY_DIAG_PUSH
 #define FY_DIAG_POP
@@ -1309,6 +1322,7 @@ static inline char *fy_alloca_vsprintf_impl(const char *fmt, va_list ap)
 #define FY_DIAG_IGNORE_ARRAY_BOUNDS /* nothing */
 #define FY_DIAG_IGNORE_UNUSED_VARIABLE /* nothing */
 #define FY_DIAG_IGNORE_UNUSED_PARAMETER /* nothing */
+#define FY_DIAG_IGNORE_TYPE_LIMITS /* nothing */
 
 #endif
 
@@ -1446,6 +1460,14 @@ static inline char *fy_alloca_vsprintf_impl(const char *fmt, va_list ap)
 #else
 #define FY_VA_ARG_SIZE_T(ap)  ((size_t)va_arg(ap, size_t))
 #define FY_VA_ARG_SSIZE_T(ap)  ((ssize_t)va_arg(ap, ssize_t))
+#endif
+
+/* Windows provides _alloca in <malloc.h>; avoid dragging windows.h into a public header. */
+#ifdef _WIN32
+#include <malloc.h>
+#ifndef alloca
+#define alloca _alloca
+#endif
 #endif
 
 #ifdef __cplusplus

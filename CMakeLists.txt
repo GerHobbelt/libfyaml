@@ -63,6 +63,7 @@ include(CheckLibraryExists)
 include(CheckSymbolExists)
 include(CMakeDependentOption)
 include(CTest)
+include(TestBigEndian)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckLibClang.cmake)
 
 # does this CMake version understand generator expressions?
@@ -103,6 +104,25 @@ macro(add_libclang_to_target target_name link_scope)
     endif()
 endmacro()
 
+function(link_whole_archive_static target_name static_target)
+    if(MSVC)
+        target_link_libraries(${target_name} PRIVATE ${static_target})
+    elseif(APPLE)
+        target_link_libraries(${target_name} PRIVATE
+            -Wl,-force_load,$<TARGET_FILE:${static_target}>
+        )
+    elseif(WIN32)
+        target_link_libraries(${target_name} PRIVATE ${static_target})
+        target_link_options(${target_name} PRIVATE
+            "LINKER:/WHOLEARCHIVE:$<TARGET_FILE:${static_target}>"
+        )
+    else()
+        target_link_libraries(${target_name} PRIVATE
+            -Wl,--whole-archive ${static_target} -Wl,--no-whole-archive
+        )
+    endif()
+endfunction()
+
 # Options
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(ENABLE_PORTABLE_TARGET "Enable portable mode (disable per-target optimizations)" OFF)
@@ -111,7 +131,9 @@ option(ENABLE_ASAN "Enable ASAN support" OFF)
 option(ENABLE_NETWORK "Enable tests requiring network access" ON)
 option(ENABLE_DEVMODE "Enable development mode only debugging" OFF)
 option(BUILD_TESTING "Build tests" ON)
-option(ENABLE_LIBCLANG "Enable libclang support for reflection" OFF)
+option(ENABLE_GENERIC "Enable generic subsystem (requires statement expressions)" ON)
+option(ENABLE_REFLECTION "Enable reflection subsystem (requires statement expressions)" ON)
+option(ENABLE_LIBCLANG "Enable libclang support for reflection" ON)
 
 # Path to LLVM installation (optional, overrides automatic detection)
 set(LLVM_ROOT "" CACHE PATH "Path to LLVM installation directory (e.g., /usr/lib/llvm-15)")
@@ -344,9 +366,14 @@ set(LIBCLANG_LIBS "")
 set(LIBCLANG_FOUND FALSE)
 set(LIBCLANG_DETECTION_METHOD "")
 
+if(NOT ENABLE_REFLECTION)
+    message(STATUS "libclang support disabled (ENABLE_REFLECTION=OFF)")
+    set(ENABLE_LIBCLANG OFF CACHE BOOL "Disable libclang" FORCE)
+endif()
+
 if(NOT HAVE_CMAKE_GEXPR)
     message(STATUS "libclang support disabled (CMake version is too old (<=3.27)")
-    set(ENABLE_LIBCLANG OFF CACHE BOOL "Disable my feature" FORCE)
+    set(ENABLE_LIBCLANG OFF CACHE BOOL "Disable libclang" FORCE)
 endif()
 
 if(NOT ENABLE_LIBCLANG)
@@ -606,7 +633,7 @@ set(TARGET_HAS_NEON FALSE)
 # Use portable implementations instead
 if(WIN32)
     message(STATUS "Windows detected: using portable SIMD implementations")
-elseif(TARGET_CPU_ANY_X86 AND NOT ENABLE_PORTABLE_TARGET)
+elseif(TARGET_CPU_X86_64 AND NOT ENABLE_PORTABLE_TARGET)
     check_c_source_compiles("
         #include <emmintrin.h>
         int main() { __m128i a = _mm_setzero_si128(); return 0; }
@@ -702,6 +729,9 @@ endif()
 
 if(NOT MSVC)
     list(APPEND COMMON_C_FLAGS -Wall -Wsign-compare)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        list(APPEND COMMON_C_FLAGS -Wextra)
+    endif()
 
     check_c_compiler_flag(-Wno-unused-function COMPILER_SUPPORTS_WNO_UNUSED_FUNCTION)
     if(COMPILER_SUPPORTS_WNO_UNUSED_FUNCTION)
@@ -713,10 +743,12 @@ if(NOT MSVC)
         list(APPEND COMMON_C_FLAGS -Wno-stringop-overflow)
     endif()
 
-    check_c_compiler_flag(-Wno-tautological-constant-out-of-range-compare
-                          COMPILER_SUPPORTS_WNO_TAUTOLOGICAL_CONSTANT_OUT_OF_RANGE_COMPARE)
-    if(COMPILER_SUPPORTS_WNO_TAUTOLOGICAL_CONSTANT_OUT_OF_RANGE_COMPARE)
-        list(APPEND COMMON_C_FLAGS -Wno-tautological-constant-out-of-range-compare)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+        check_c_compiler_flag(-Wno-tautological-constant-out-of-range-compare
+                              COMPILER_SUPPORTS_WNO_TAUTOLOGICAL_CONSTANT_OUT_OF_RANGE_COMPARE)
+        if(COMPILER_SUPPORTS_WNO_TAUTOLOGICAL_CONSTANT_OUT_OF_RANGE_COMPARE)
+            list(APPEND COMMON_C_FLAGS -Wno-tautological-constant-out-of-range-compare)
+        endif()
     endif()
 
     set(USE_STD 0)
@@ -779,6 +811,50 @@ int main(void) {
     return x - 2;
 }
 " HAVE_STATEMENT_EXPRESSIONS)
+test_big_endian(IS_BIG_ENDIAN)
+if(NOT IS_BIG_ENDIAN)
+    set(HAVE_GENERIC_PLATFORM 1)
+else()
+    set(HAVE_GENERIC_PLATFORM 0)
+endif()
+
+if(HAVE_STATEMENT_EXPRESSIONS AND HAVE_GENERIC_PLATFORM)
+    list(APPEND COMMON_C_DEFINITIONS HAVE_STATEMENT_EXPRESSIONS)
+
+    if(ENABLE_GENERIC)
+        set(HAVE_GENERIC 1)
+        list(APPEND COMMON_C_DEFINITIONS HAVE_GENERIC)
+    else()
+        set(HAVE_GENERIC 0)
+    endif()
+
+    if(ENABLE_REFLECTION)
+        set(HAVE_REFLECTION 1)
+        list(APPEND COMMON_C_DEFINITIONS HAVE_REFLECTION)
+    else()
+        set(HAVE_REFLECTION 0)
+    endif()
+elseif(HAVE_STATEMENT_EXPRESSIONS)
+    list(APPEND COMMON_C_DEFINITIONS HAVE_STATEMENT_EXPRESSIONS)
+
+    set(HAVE_GENERIC 0)
+    if(ENABLE_GENERIC)
+        message(STATUS "Generic subsystem disabled (requires little-endian targets)")
+    endif()
+
+    if(ENABLE_REFLECTION)
+        set(HAVE_REFLECTION 1)
+        list(APPEND COMMON_C_DEFINITIONS HAVE_REFLECTION)
+    else()
+        set(HAVE_REFLECTION 0)
+    endif()
+else()
+    set(HAVE_GENERIC 0)
+    set(HAVE_REFLECTION 0)
+    if(ENABLE_GENERIC OR ENABLE_REFLECTION)
+        message(STATUS "Statement expressions not supported; generic and reflection disabled")
+    endif()
+endif()
 
 # the options for the libs
 set(LIB_OPTS "")
@@ -885,6 +961,34 @@ set(LIBSRCS
     src/lib/fy-parse-diag.c
 )
 
+if(HAVE_GENERIC)
+    list(APPEND LIBSRCS
+        src/generic/fy-generic.c
+        src/generic/fy-generic-decoder.c
+        src/generic/fy-generic-encoder.c
+        src/generic/fy-generic-op.c
+        src/generic/fy-generic-iter.c
+    )
+endif()
+
+if(HAVE_REFLECTION)
+    list(APPEND LIBSRCS
+        src/reflection/fy-reflection.c
+        src/reflection/fy-packed-backend.c
+        src/reflection/fy-null-backend.c
+        src/reflection/fy-registry.c
+        src/reflection/fy-type-meta.c
+        src/reflection/fy-meta-type-system.c
+        src/reflection/fy-type-context.c
+        src/reflection/fy-meta-serdes.c
+        src/reflection/fy-reflection-util.c
+    )
+    # Conditionally add clang backend if libclang is available
+    if(HAVE_LIBCLANG)
+        list(APPEND LIBSRCS src/reflection/fy-clang-backend.c)
+    endif()
+endif()
+
 set(LIBHDRSPUB
     include/libfyaml/libfyaml-util.h
     include/libfyaml/libfyaml-core.h
@@ -900,6 +1004,13 @@ set(LIBHDRSPUB
     include/libfyaml/libfyaml-vlsize.h
     include/libfyaml/libfyaml-atomics.h
 )
+
+if(HAVE_REFLECTION)
+    list(APPEND LIBHDRSPUB include/libfyaml/libfyaml-reflection.h)
+endif()
+if(HAVE_GENERIC)
+    list(APPEND LIBHDRSPUB include/libfyaml/libfyaml-generic.h)
+endif()
 
 # BLAKE3 portable library
 add_library(b3portable OBJECT
@@ -1176,6 +1287,8 @@ target_include_directories(fyaml
         ${CMAKE_CURRENT_SOURCE_DIR}/src/thread
         ${CMAKE_CURRENT_SOURCE_DIR}/src/allocator
         ${CMAKE_CURRENT_SOURCE_DIR}/src/blake3
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/generic
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/reflection
 )
 
 if(NOT WIN32)
@@ -1229,7 +1342,7 @@ if(NOT MSVC AND NOT WIN32)
     if(HAVE_ASAN)
         target_compile_options(fyaml PRIVATE ${ASAN_C_FLAGS} -fno-omit-frame-pointer)
         # Use INTERFACE to propagate link flags to executables linking against this library
-		target_link_options(fyaml PRIVATE ${ASAN_C_FLAGS} INTERFACE ${ASAN_C_FLAGS})
+        target_link_options(fyaml PRIVATE ${ASAN_C_FLAGS} INTERFACE ${ASAN_C_FLAGS})
     endif()
 endif()
 
@@ -1256,13 +1369,21 @@ endif()
 # Build fy-tool
 set(FY_TOOL_SOURCES
     src/tool/fy-tool.c
-    src/tool/fy-tool-util.c
     src/tool/fy-tool-dump.c
     ${GETOPT_SOURCES}
 )
 
 set(FY_TOOL_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/valgrind
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/reflection
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lib
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/util
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/xxhash
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/thread
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/allocator
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/blake3
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/generic
+    ${CMAKE_CURRENT_BINARY_DIR}
     ${GETOPT_INCLUDES}
 )
 
@@ -1293,6 +1414,8 @@ set(INTERNAL_TOOL_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/xxhash
     ${CMAKE_CURRENT_SOURCE_DIR}/src/thread
     ${CMAKE_CURRENT_SOURCE_DIR}/src/allocator
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/generic
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/reflection
     ${CMAKE_CURRENT_BINARY_DIR}
     ${LIBYAML_INCLUDE_DIRS}
     ${GETOPT_INCLUDES}
@@ -1309,26 +1432,15 @@ if(HAVE_LIBYAML)
 
     target_include_directories(libfyaml-parser PRIVATE ${INTERNAL_TOOL_INCLUDES})
     target_link_directories(libfyaml-parser PRIVATE ${LIBYAML_LIBRARY_DIRS})
+    link_whole_archive_static(libfyaml-parser fyaml_static)
+    target_link_libraries(libfyaml-parser PRIVATE
+        ${LIBYAML_LIBRARIES}
+        $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
+    )
     if(NOT MSVC)
-        # Embed libfyaml code statically, allow dynamic linking for system libraries
-        if(APPLE)
-            target_link_libraries(libfyaml-parser PRIVATE
-                -Wl,-force_load,$<TARGET_FILE:fyaml_static>
-                ${LIBYAML_LIBRARIES}
-                $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-            )
-        else()
-            target_link_libraries(libfyaml-parser PRIVATE
-                -Wl,--whole-archive fyaml_static -Wl,--no-whole-archive
-                ${LIBYAML_LIBRARIES}
-                $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-            )
-        endif()
         if(HAVE_ASAN)
             target_link_options(libfyaml-parser PRIVATE ${ASAN_C_FLAGS})
         endif()
-    else()
-        target_link_libraries(libfyaml-parser PRIVATE fyaml_static ${LIBYAML_LIBRARIES})
     endif()
     if(HAVE_LIBCLANG)
         target_link_directories(libfyaml-parser PRIVATE ${LIBCLANG_LINK_DIRS})
@@ -1344,23 +1456,14 @@ target_include_directories(fy-thread PRIVATE ${INTERNAL_TOOL_INCLUDES})
 target_compile_definitions(fy-thread PRIVATE
     ${COMMON_C_DEFINITIONS}
     FY_STATIC)
+link_whole_archive_static(fy-thread fyaml_static)
+target_link_libraries(fy-thread PRIVATE
+    $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
+)
 if(NOT MSVC)
-    if(APPLE)
-        target_link_libraries(fy-thread PRIVATE
-            -Wl,-force_load,$<TARGET_FILE:fyaml_static>
-            $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-        )
-    else()
-        target_link_libraries(fy-thread PRIVATE
-            -Wl,--whole-archive fyaml_static -Wl,--no-whole-archive
-            $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-        )
-    endif()
     if(HAVE_ASAN)
         target_link_options(fy-thread PRIVATE ${ASAN_C_FLAGS})
     endif()
-else()
-    target_link_libraries(fy-thread PRIVATE fyaml_static)
 endif()
 if(HAVE_LIBCLANG)
     target_link_directories(fy-thread PRIVATE ${LIBCLANG_LINK_DIRS})
@@ -1378,23 +1481,14 @@ target_include_directories(fy-b3sum PRIVATE
 target_compile_definitions(fy-b3sum PRIVATE
     ${COMMON_C_DEFINITIONS}
     FY_STATIC)
+link_whole_archive_static(fy-b3sum fyaml_static)
+target_link_libraries(fy-b3sum PRIVATE
+    $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
+)
 if(NOT MSVC)
-    if(APPLE)
-        target_link_libraries(fy-b3sum PRIVATE
-            -Wl,-force_load,$<TARGET_FILE:fyaml_static>
-            $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-        )
-    else()
-        target_link_libraries(fy-b3sum PRIVATE
-            -Wl,--whole-archive fyaml_static -Wl,--no-whole-archive
-            $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-        )
-    endif()
     if(HAVE_ASAN)
         target_link_options(fy-b3sum PRIVATE ${ASAN_C_FLAGS})
     endif()
-else()
-    target_link_libraries(fy-b3sum PRIVATE fyaml_static)
 endif()
 if(HAVE_LIBCLANG)
     target_link_directories(fy-b3sum PRIVATE ${LIBCLANG_LINK_DIRS})
@@ -1409,23 +1503,14 @@ target_include_directories(fy-allocators PRIVATE ${INTERNAL_TOOL_INCLUDES})
 target_compile_definitions(fy-allocators PRIVATE
     ${COMMON_C_DEFINITIONS}
     FY_STATIC)
+link_whole_archive_static(fy-allocators fyaml_static)
+target_link_libraries(fy-allocators PRIVATE
+    $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
+)
 if(NOT MSVC)
-    if(APPLE)
-        target_link_libraries(fy-allocators PRIVATE
-            -Wl,-force_load,$<TARGET_FILE:fyaml_static>
-            $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-        )
-    else()
-        target_link_libraries(fy-allocators PRIVATE
-            -Wl,--whole-archive fyaml_static -Wl,--no-whole-archive
-            $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-        )
-    endif()
     if(HAVE_ASAN)
         target_link_options(fy-allocators PRIVATE ${ASAN_C_FLAGS})
     endif()
-else()
-    target_link_libraries(fy-allocators PRIVATE fyaml_static)
 endif()
 if(HAVE_LIBCLANG)
     target_link_directories(fy-allocators PRIVATE ${LIBCLANG_LINK_DIRS})
@@ -1466,6 +1551,9 @@ if(CAN_TEST)
             test/libfyaml-test-private-id.c
             test/libfyaml-test-parser.c
             test/libfyaml-test-thread.c
+            $<$<BOOL:${HAVE_GENERIC}>:test/libfyaml-test-generic.c>
+            $<$<BOOL:${HAVE_GENERIC}>:test/libfyaml-test-generic-scalars.c>
+			$<$<BOOL:${HAVE_REFLECTION}>:test/libfyaml-test-reflection.c>
             ${GETOPT_SOURCES}
         )
 
@@ -1479,6 +1567,8 @@ if(CAN_TEST)
             ${CMAKE_CURRENT_SOURCE_DIR}/src/lib
             ${CMAKE_CURRENT_SOURCE_DIR}/src/util
             ${CMAKE_CURRENT_SOURCE_DIR}/src/allocator
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/generic
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/reflection
             ${CMAKE_CURRENT_BINARY_DIR}
             ${CHECK_INCLUDE_DIRS}
             ${GETOPT_INCLUDES}
@@ -1486,25 +1576,15 @@ if(CAN_TEST)
 
         # Link against static library to access private symbols
         # Use same pattern as internal tools
+        link_whole_archive_static(libfyaml-test fyaml_static)
+        target_link_libraries(libfyaml-test PRIVATE
+            ${CHECK_LIBRARIES}
+            $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
+        )
         if(NOT MSVC)
-            if(APPLE)
-                target_link_libraries(libfyaml-test PRIVATE
-                    -Wl,-force_load,$<TARGET_FILE:fyaml_static>
-                    ${CHECK_LIBRARIES}
-                    $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-                )
-            else()
-                target_link_libraries(libfyaml-test PRIVATE
-                    -Wl,--whole-archive fyaml_static -Wl,--no-whole-archive
-                    ${CHECK_LIBRARIES}
-                    $<$<BOOL:${HAVE_LIBCLANG}>:${LIBCLANG_LIBS}>
-                )
-            endif()
             if(HAVE_ASAN)
                 target_link_options(libfyaml-test PRIVATE ${ASAN_C_FLAGS})
             endif()
-        else()
-            target_link_libraries(libfyaml-test PRIVATE fyaml_static ${CHECK_LIBRARIES})
         endif()
         if(CHECK_LIBRARY_DIRS)
             target_link_directories(libfyaml-test PRIVATE ${CHECK_LIBRARY_DIRS})
@@ -1527,7 +1607,7 @@ if(CAN_TEST)
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test
         )
 
-	add_libfyaml_tests()
+        add_libfyaml_tests()
     endif()
 
     # Error tests - register individual subtests
@@ -1553,12 +1633,21 @@ if(CAN_TEST)
         add_testsuite_tests(testsuite testsuite.test)
         add_testsuite_tests(testsuite-evstream testsuite-evstream.test)
         add_testsuite_tests(testsuite-resolution testsuite-resolution.test)
+        if(HAVE_GENERIC)
+            add_testsuite_tests(testsuite-generic testsuite-generic.test)
+        endif()
         if(HAVE_JQ)
             add_testsuite_tests(testsuite-json testsuite-json.test)
         endif()
 
         # JSON test suite - register individual subtests
         add_jsontestsuite_tests()
+    endif()
+
+    # Reflection tests - only if libclang is available and reflection is enabled
+    if(HAVE_REFLECTION AND HAVE_LIBCLANG)
+        add_testreflection_tests()
+        add_testreflection_packed_tests()
     endif()
 
     # Build all test dependencies as part of default 'all' target
@@ -1583,6 +1672,9 @@ if(CAN_TEST)
         testemitter-restreaming.test
     )
 
+    if(HAVE_GENERIC)
+        list(APPEND TEST_SUITES testsuite-generic.test)
+    endif()
     if(HAVE_JQ)
         list(APPEND TEST_SUITES testsuite-json.test)
     endif()
@@ -1591,6 +1683,23 @@ endif()
 
 # Documentation
 find_program(SPHINX_EXECUTABLE NAMES sphinx-build)
+find_program(LATEXMK_EXECUTABLE NAMES latexmk)
+find_program(KPSEWHICH_EXECUTABLE NAMES kpsewhich)
+
+set(HAVE_XCOLOR_STY FALSE)
+if(KPSEWHICH_EXECUTABLE)
+    execute_process(
+        COMMAND ${KPSEWHICH_EXECUTABLE} xcolor.sty
+        RESULT_VARIABLE KPSEWHICH_XCOLOR_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(KPSEWHICH_XCOLOR_RESULT EQUAL 0)
+        set(HAVE_XCOLOR_STY TRUE)
+    endif()
+endif()
+# all of these to be able to build doc-latexpdf
+set(HAVE_DOC_LATEXPDF (SPHINX_EXECUTABLE AND LATEXMK_EXECUTABLE AND HAVE_XCOLOR_STY))
 
 if(SPHINX_EXECUTABLE)
     set(HAVE_SPHINX TRUE)
@@ -1612,73 +1721,83 @@ if(SPHINX_EXECUTABLE)
         VERBATIM
     )
 
-    add_custom_target(doc-latexpdf
-        COMMAND ${SPHINX_EXECUTABLE} -M latexpdf "${SPHINX_SOURCE_DIR}" "${SPHINX_BUILD_DIR}"
+    add_custom_target(doc-text
+        COMMAND ${SPHINX_EXECUTABLE} -M text "${SPHINX_SOURCE_DIR}" "${SPHINX_BUILD_DIR}"
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        COMMENT "Building PDF documentation with Sphinx"
+        COMMENT "Building plain-text documentation with Sphinx"
         VERBATIM
     )
+
+    if(HAVE_DOC_LATEXPDF)
+        add_custom_target(doc-latexpdf
+            COMMAND ${SPHINX_EXECUTABLE} -M latexpdf "${SPHINX_SOURCE_DIR}" "${SPHINX_BUILD_DIR}"
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            COMMENT "Building PDF documentation with Sphinx"
+            VERBATIM
+        )
+    endif()
 
     add_custom_target(doc-clean
         COMMAND ${CMAKE_COMMAND} -E remove_directory "${SPHINX_BUILD_DIR}"
         COMMENT "Cleaning documentation build directory"
     )
 
+    add_custom_target(doc-canned-man
+        DEPENDS doc-man
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SPHINX_BUILD_DIR}/man/fy-tool.1"
+            "${CMAKE_CURRENT_SOURCE_DIR}/doc/canned-man/fy-tool.1"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SPHINX_BUILD_DIR}/man/libfyaml.3"
+            "${CMAKE_CURRENT_SOURCE_DIR}/doc/canned-man/libfyaml.3"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SPHINX_BUILD_DIR}/man/libfyaml-core.3"
+            "${CMAKE_CURRENT_SOURCE_DIR}/doc/canned-man/libfyaml-core.3"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SPHINX_BUILD_DIR}/man/libfyaml-misc.3"
+            "${CMAKE_CURRENT_SOURCE_DIR}/doc/canned-man/libfyaml-misc.3"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SPHINX_BUILD_DIR}/man/libfyaml-generics.3"
+            "${CMAKE_CURRENT_SOURCE_DIR}/doc/canned-man/libfyaml-generics.3"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SPHINX_BUILD_DIR}/man/libfyaml-reflection.3"
+            "${CMAKE_CURRENT_SOURCE_DIR}/doc/canned-man/libfyaml-reflection.3"
+        COMMENT "Updating canned man pages from the built Sphinx man pages"
+        VERBATIM
+    )
+
     message(STATUS "Sphinx found: ${SPHINX_EXECUTABLE}")
     message(STATUS "  make doc-html     - Build HTML documentation")
     message(STATUS "  make doc-man      - Build man pages")
-    message(STATUS "  make doc-latexpdf - Build PDF documentation")
-
-    install(CODE "
-        execute_process(
-            COMMAND \"${SPHINX_EXECUTABLE}\" -M man \"${SPHINX_SOURCE_DIR}\" \"${SPHINX_BUILD_DIR}\"
-            WORKING_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"
-            RESULT_VARIABLE sphinx_man_result
-        )
-        if(NOT sphinx_man_result EQUAL 0)
-            message(FATAL_ERROR \"Failed to generate Sphinx man pages during install\")
-        endif()
-
-        file(INSTALL
-            DESTINATION \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1\"
-            TYPE FILE
-            FILES \"${SPHINX_BUILD_DIR}/man/fy-tool.1\"
-        )
-        file(INSTALL
-            DESTINATION \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man3\"
-            TYPE FILE
-            FILES
-                \"${SPHINX_BUILD_DIR}/man/libfyaml.3\"
-                \"${SPHINX_BUILD_DIR}/man/libfyaml-core.3\"
-                \"${SPHINX_BUILD_DIR}/man/libfyaml-misc.3\"
-        )
-    ")
-    if(NOT WIN32)
-        install(CODE "
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-dump.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-filter.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-testsuite.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-join.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-ypath.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-compose.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-        ")
+    message(STATUS "  make doc-canned-man - Refresh canned man pages from doc-man")
+    message(STATUS "  make doc-text     - Build plain-text documentation")
+    if(HAVE_DOC_LATEXPDF)
+        message(STATUS "  make doc-latexpdf - Build PDF documentation")
     endif()
 else()
     set(HAVE_SPHINX FALSE)
     message(STATUS "Sphinx not found - documentation targets disabled")
     message(STATUS "  Install: pip3 install sphinx sphinx_rtd_theme sphinx-markdown-builder linuxdoc")
+endif()
 
-    install(FILES doc/canned-man/fy-tool.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
-    if(NOT WIN32)
-        install(CODE "
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-dump.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-filter.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-testsuite.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-join.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-ypath.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-            execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-compose.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
-        ")
-    endif()
+install(FILES doc/canned-man/fy-tool.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
+install(FILES
+    doc/canned-man/libfyaml.3
+    doc/canned-man/libfyaml-core.3
+    doc/canned-man/libfyaml-misc.3
+    doc/canned-man/libfyaml-generics.3
+    doc/canned-man/libfyaml-reflection.3
+    DESTINATION ${CMAKE_INSTALL_MANDIR}/man3
+)
+if(NOT WIN32)
+    install(CODE "
+        execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-dump.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-filter.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-testsuite.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-join.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-ypath.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink fy-tool.1 fy-compose.1 WORKING_DIRECTORY \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)
+    ")
 endif()
 
 # Install targets
@@ -1755,6 +1874,84 @@ install(
 # tags and cscope support
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tags.cmake)
 
+# Python core bindings
+find_package(Python3 COMPONENTS Interpreter Development.Module)
+if(Python3_FOUND)
+    set(_ENABLE_PYTHON_BINDINGS_DEFAULT ON)
+else()
+    set(_ENABLE_PYTHON_BINDINGS_DEFAULT OFF)
+endif()
+option(ENABLE_PYTHON_BINDINGS "Build Python core bindings (_libfyaml extension)" ${_ENABLE_PYTHON_BINDINGS_DEFAULT})
+
+if(WIN32 AND ENABLE_PYTHON_BINDINGS AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "Windows Python bindings require Clang/clang-cl because libfyaml generics depend on statement expressions")
+elseif(ENABLE_PYTHON_BINDINGS AND NOT HAVE_GENERIC)
+    message(STATUS "Python bindings disabled (requires statement expressions / generic support)")
+    set(HAVE_PYTHON_BINDINGS 0)
+elseif(ENABLE_PYTHON_BINDINGS)
+    if(NOT Python3_FOUND)
+        message(FATAL_ERROR "Python3 development headers not found (required for ENABLE_PYTHON_BINDINGS)")
+    endif()
+
+    Python3_add_library(_libfyaml MODULE WITH_SOABI
+        "${CMAKE_CURRENT_SOURCE_DIR}/python-libfyaml/libfyaml/_libfyaml.c"
+    )
+    target_include_directories(_libfyaml PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+    target_link_libraries(_libfyaml PRIVATE fyaml_static)
+    target_compile_options(_libfyaml PRIVATE ${COMMON_C_FLAGS})
+    if(WIN32 AND (NOT DEFINED Python3_LIBRARY_DEBUG OR Python3_LIBRARY_DEBUG MATCHES "-NOTFOUND$"))
+        message(STATUS "Python3 debug library not found; building _libfyaml without _DEBUG against release Python")
+        if(TARGET Python3::Python)
+            set_property(TARGET Python3::Python PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
+        endif()
+        if(TARGET Python3::Module)
+            set_property(TARGET Python3::Module PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
+        endif()
+        set_property(TARGET _libfyaml PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+        if(MSVC)
+            target_compile_options(_libfyaml PRIVATE $<$<CONFIG:Debug>:/U_DEBUG>)
+        else()
+            target_compile_options(_libfyaml PRIVATE $<$<CONFIG:Debug>:-U_DEBUG>)
+        endif()
+    endif()
+    if(HAVE_ASAN)
+        target_compile_options(_libfyaml PRIVATE ${ASAN_C_FLAGS})
+        target_link_options(_libfyaml PRIVATE ${ASAN_C_FLAGS})
+    endif()
+    # Place the .so in the build tree, not the source tree
+    set(_PY_PKG_SRC "${CMAKE_CURRENT_SOURCE_DIR}/python-libfyaml/libfyaml")
+    set(_PY_PKG_DST "${CMAKE_CURRENT_BINARY_DIR}/python-libfyaml/libfyaml")
+    set_target_properties(_libfyaml PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${_PY_PKG_DST}"
+        RUNTIME_OUTPUT_DIRECTORY "${_PY_PKG_DST}"
+        PREFIX ""
+    )
+    # Link/copy source files into the build staging dir so the complete
+    # package is importable directly from the build tree.
+    # COPY_ON_ERROR makes this work on Windows where symlinks may be
+    # unavailable (requires Developer Mode or admin rights).
+    file(MAKE_DIRECTORY "${_PY_PKG_DST}")
+    file(GLOB _py_srcs "${_PY_PKG_SRC}/*.py" "${_PY_PKG_SRC}/*.pyi")
+    foreach(_src ${_py_srcs})
+        get_filename_component(_name "${_src}" NAME)
+        file(CREATE_LINK "${_src}" "${_PY_PKG_DST}/${_name}" SYMBOLIC COPY_ON_ERROR)
+    endforeach()
+    set(HAVE_PYTHON_BINDINGS 1)
+else()
+    set(HAVE_PYTHON_BINDINGS 0)
+endif()
+
+# Python binding tests (pytest) - one CTest entry per test function/method
+# ASan + dlopen of an ASan-instrumented extension crashes on macOS and Windows,
+# so skip Python tests in those configurations.
+if(HAVE_PYTHON_BINDINGS AND BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING
+        AND NOT (HAVE_ASAN AND (APPLE OR WIN32)))
+    add_python_tests()
+endif()
+
 # Print configuration summary
 message(STATUS "")
 message(STATUS "---{ ${PROJECT_NAME} ${PROJECT_VERSION} }---")
@@ -1776,6 +1973,9 @@ message(STATUS "HAVE_COMPATIBLE_CHECK: ${HAVE_COMPATIBLE_CHECK}")
 message(STATUS "HAVE_LIBYAML:          ${HAVE_LIBYAML}")
 message(STATUS "HAVE_CMAKE_GEXPR:      ${HAVE_CMAKE_GEXPR}")
 message(STATUS "HAVE_LIBCLANG:         ${HAVE_LIBCLANG}")
+message(STATUS "HAVE_GENERIC:          ${HAVE_GENERIC}")
+message(STATUS "HAVE_REFLECTION:       ${HAVE_REFLECTION}")
+message(STATUS "HAVE_PYTHON_BINDINGS:  ${HAVE_PYTHON_BINDINGS}")
 message(STATUS "HAVE_CLANG_BLOCKS:     ${HAVE_CLANG_BLOCKS}")
 message(STATUS "HAVE_NETWORK:          ${HAVE_NETWORK}")
 message(STATUS "HAVE_DEVMODE:          ${HAVE_DEVMODE}")

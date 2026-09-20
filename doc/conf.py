@@ -14,7 +14,26 @@ import os
 import pathlib
 import subprocess
 import sys
+import types
 sys.path.insert(0, os.path.abspath('.'))
+
+# linuxdoc still imports docutils.utils.error_reporting, which was removed in
+# newer docutils releases. Provide the small API surface linuxdoc uses so Sphinx
+# can keep loading with either docutils version.
+try:
+    import docutils.utils.error_reporting  # type: ignore  # noqa: F401
+except ModuleNotFoundError:
+    error_reporting = types.ModuleType('docutils.utils.error_reporting')
+
+    def ErrorString(error):
+        return str(error)
+
+    def SafeString(value):
+        return str(value)
+
+    error_reporting.ErrorString = ErrorString
+    error_reporting.SafeString = SafeString
+    sys.modules['docutils.utils.error_reporting'] = error_reporting
 
 
 # -- Project information -----------------------------------------------------
@@ -95,11 +114,13 @@ master_doc = 'index'
 
 # Tell kernel-doc to strip libfyaml-specific compiler-hint macros from
 # function prototypes before passing them to Sphinx C domain.
-kernel_doc_known_attrs = "FY_ALWAYS_INLINE"
+kernel_doc_known_attrs = "FY_ALWAYS_INLINE FY_GENERIC_CONTAINER_ALIGNMENT"
 
 man_pages = [
     ('man/fy-tool', 'fy-tool', 'fy-tool documentation ', '', 1),
     ('libfyaml', 'libfyaml', 'libfyaml API overview', '', 3),
     ('libfyaml-core', 'libfyaml-core', 'libfyaml core API', '', 3),
     ('libfyaml-misc', 'libfyaml-misc', 'libfyaml miscellaneous API', '', 3),
+    ('libfyaml-generics', 'libfyaml-generics', 'libfyaml generic API', '', 3),
+    ('libfyaml-reflection', 'libfyaml-reflection', 'libfyaml reflection API', '', 3),
 ]
