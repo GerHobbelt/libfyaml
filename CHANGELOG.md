@@ -5,6 +5,98 @@ All notable changes to libfyaml will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha5] - 2026-04-18
+
+The fifth alpha milestone for the 1.0 line. This release broadens the build
+and CI story around the 1.0 work while hardening generic, threading, parser,
+emitter, and reflection behavior with another round of targeted fixes and
+regression coverage.
+
+### Added
+
+- `build`: add the `pcons` build system and CI workflow
+- `ci`: enable address sanitizer builds via `ENABLE_ASAN=1`
+- `test`: add regression coverage for parser/emitter bugs, reflection malformed metadata, thread-pool shutdown/join races, and generic `preduce` behavior
+
+### Changed
+
+- `build`: require `pcons >= 0.14.1` to pick up the link-flag fix needed by the new build flow
+- `generic`: use typedefs for erased `va_arg` callbacks
+- `thread`: refine steal-mode worker reservation and shutdown behavior
+- `reflection`: mark stub parameters unused when libclang is unavailable and defer meta document ownership handoff more carefully
+- `build`: avoid outputting `none required` into `LIBM` when no math linker flags are needed
+- `configure`: fix a stray `fi` in `configure.ac`
+
+### Fixed
+
+- `generic`: fix `preduce` seeding via chunk and final workers
+- `thread`: tolerate futex shutdown races and remove a bogus test document external-steal join contract
+- `parse`: correctly handle escaped space followed by newlines
+- `atom`: rework `fy_atom_text_analyze()` for literals and fix the off-by-one in `fy_accel_resize()` prime table lookup
+- `reflection`: fix field-data destroy cleanup
+- `diag`: unref report tokens correctly without a sink
+
+### Statistics
+
+- 23 commits since `v1.0.0-alpha4`
+- Focus areas: new build/CI infrastructure, ASAN coverage, and correctness fixes across generic, thread, parse/emitter, and reflection paths
+
+## [1.0.0-alpha4] - 2026-03-20
+
+The fourth alpha milestone for the 1.0 line. This is a narrow follow-up to
+`1.0.0-alpha3` focused on repairing the Python packaging and wheel-release
+story after the `alpha3` release. The core YAML engine and the 1.0 API
+direction are otherwise unchanged.
+
+### Changed
+
+- `python`: stage the full source tree for `sdist` builds so source
+  distributions contain the files needed to build correctly
+- `python`: detect the staged `sdist` repository root correctly during packaging
+- `python`: add `cp314` wheel builds to the release matrix
+
+### Fixed
+
+- `python`: fix the broken Python wheel / source distribution release flow from `alpha3`
+
+### Statistics
+
+- 3 commits since `v1.0.0-alpha3`
+- Focus area: Python packaging and wheel/sdist release correctness
+
+## [1.0.0-alpha3] - 2026-03-20
+
+The third alpha milestone for the 1.0 line. This release keeps the generic and
+reflection API direction introduced in the earlier alphas, but makes the Python
+binding, packaging, and Windows build story much more practical. It also rolls
+in another round of warning cleanup and a user-visible emitter correctness fix.
+
+### Changed
+
+- `python`: build the Windows extension via CMake and use `clang-cl` for wheel builds
+- `python`: modernize `pyproject.toml` license metadata while keeping package metadata compatible
+- `python`: rework tests for Windows and fix broken `pytest` detection on macOS Homebrew
+- `cmake`: make shared-library ABI versioning follow `.libtool-version`, so CMake builds now emit the correct SONAME/versioned library names
+- `cmake`: disable Python bindings automatically when a matching debug Python is not available
+- `cmake`: unify the Python debug import fallback and make the Python AST parse use UTF-8
+- `cmake`: factor whole-archive static linking and make workflows run on the `devel` branch too
+- `util`: ensure `alloca` is available on Windows in public-header use
+- `util`: gate diagnostic pragma helpers on GCC 13+
+- `generic`: make `fy_gb_string_vcreate()` more efficient
+
+### Fixed
+
+- `emit`: preserve trailing comments after block sequences and mappings when re-emitting YAML (#18)
+- `emit`: avoid a double `vsprintf()` call in `fy_emit_vprintf()`
+- `python`: fix a batch of PyPI packaging problems for the binding
+- `python/windows`: make missing Python binding builds non-fatal where appropriate
+- `misc`: tighten `-Wextra` cleanup across the library and build configuration
+
+### Statistics
+
+- 26 commits since `v1.0.0-alpha2`
+- Focus areas: Windows support, Python packaging, warning-clean builds, emitter correctness, and CMake ABI-versioning correctness
+
 ## [1.0.0-alpha2] - 2026-03-18
 
 The second alpha milestone for the 1.0 line. This release does not change the
@@ -580,6 +672,9 @@ Jose Luis Blanco-Claraco, Andrey Somov, Orange_233, Martin Diehl
 
 Initial public release with comprehensive YAML 1.2 support.
 
+[1.0.0-alpha5]: https://github.com/pantoniou/libfyaml/compare/v1.0.0-alpha4...v1.0.0-alpha5
+[1.0.0-alpha4]: https://github.com/pantoniou/libfyaml/compare/v1.0.0-alpha3...v1.0.0-alpha4
+[1.0.0-alpha3]: https://github.com/pantoniou/libfyaml/compare/v1.0.0-alpha2...v1.0.0-alpha3
 [1.0.0-alpha2]: https://github.com/pantoniou/libfyaml/compare/v1.0.0-alpha1...v1.0.0-alpha2
 [1.0.0-alpha1]: https://github.com/pantoniou/libfyaml/compare/v0.9.6...v1.0.0-alpha1
 [0.9.6]: https://github.com/pantoniou/libfyaml/compare/v0.9.5...v0.9.6

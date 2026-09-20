@@ -27,6 +27,7 @@
 #include "fy-generic.h"
 #include "fy-generic-decoder.h"
 #include "fy-generic-encoder.h"
+#include "fy-parse.h"
 
 #include "fy-check.h"
 
@@ -3129,7 +3130,7 @@ START_TEST(gb_preduce)
 {
 	struct fy_generic_builder_cfg cfg;
 	struct fy_generic_builder *gb;
-	fy_generic seq, v;
+	fy_generic seq, map, v;
 	int sum, exp_sum;
 	size_t i, num_items;
 	fy_generic *items;
@@ -3181,6 +3182,21 @@ START_TEST(gb_preduce)
 		sum = fy_cast(v, INT_MIN);
 		ck_assert(sum == 26);
 		printf("> preduce-small-seq-sum: ");
+		fy_generic_emit_default(v);
+
+		v = fy_generic_op(gb, FYGBOPF_REDUCE | FYGBOPF_PARALLEL, seq, 0, NULL, NULL,
+				fy_generic_test_sum_reducer, fy_value(gb, 10));
+		sum = fy_cast(v, INT_MIN);
+		ck_assert(sum == 36);
+		printf("> preduce-small-seq-sum-acc10: ");
+		fy_generic_emit_default(v);
+
+		map = fy_mapping("a", 7, "b", 6, "c", 5, "d", 8);
+		v = fy_generic_op(gb, FYGBOPF_REDUCE | FYGBOPF_PARALLEL, map, 0, NULL, NULL,
+				  fy_generic_test_sum_reducer, fy_value(gb, 10));
+		sum = fy_cast(v, INT_MIN);
+		ck_assert(sum == 36);
+		printf("> preduce-map-sum-acc10: ");
 		fy_generic_emit_default(v);
 
 		fy_generic_builder_destroy(gb);
@@ -4284,6 +4300,170 @@ START_TEST(parse_emit_ops)
 	fy_generic_emit_default(emitted);
 #endif
 
+}
+END_TEST
+
+START_TEST(generic_document_builder_pull_mode)
+{
+	char buf[65536];
+	struct fy_generic_builder *gb;
+	struct fy_generic_document_builder_cfg cfg;
+	struct fy_generic_document_builder *fygdb;
+	struct fy_parser *fyp;
+	const char *yaml = "---\nfoo: 1\n---\nbar: 2\n";
+	fy_generic doc1, doc2;
+
+	gb = fy_generic_builder_create_in_place(FYGBCF_SCHEMA_AUTO | FYGBCF_SCOPE_LEADER, NULL,
+			buf, sizeof(buf));
+	ck_assert_ptr_ne(gb, NULL);
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.parse_cfg.flags = FYPCF_DEFAULT_PARSE | FYPCF_RESOLVE_DOCUMENT;
+	cfg.gb = gb;
+	cfg.flags = FYGDBF_DISABLE_DIRECTORY;
+
+	fyp = fy_parser_create(&cfg.parse_cfg);
+	ck_assert_ptr_ne(fyp, NULL);
+	ck_assert_int_eq(fy_parser_set_string(fyp, yaml, FY_NT), 0);
+
+	fygdb = fy_generic_document_builder_create(&cfg);
+	ck_assert_ptr_ne(fygdb, NULL);
+
+	doc1 = fy_generic_document_builder_load_document(fygdb, fyp);
+	ck_assert(fy_generic_is_mapping(doc1));
+	ck_assert_int_eq(fy_get(doc1, "foo", -1), 1);
+
+	doc2 = fy_generic_document_builder_load_document(fygdb, fyp);
+	ck_assert(fy_generic_is_mapping(doc2));
+	ck_assert_int_eq(fy_get(doc2, "bar", -1), 2);
+
+	ck_assert(fy_generic_is_invalid(fy_generic_document_builder_load_document(fygdb, fyp)));
+
+	fy_generic_document_builder_destroy(fygdb);
+	fy_parser_destroy(fyp);
+}
+END_TEST
+
+START_TEST(generic_document_builder_push_mode_metadata)
+{
+	char buf_actual[65536];
+	char buf_expected[65536];
+	struct fy_generic_builder *gb_actual, *gb_expected;
+	struct fy_generic_document_builder_cfg cfg;
+	struct fy_generic_document_builder *fygdb;
+	struct fy_parser *fyp;
+	struct fy_eventp *fyep;
+	const char *yaml = "---\nfoo: \"bar\" # trailing\n";
+	fy_generic actual, expected, value, comment, style, marker;
+	int rc;
+
+	gb_actual = fy_generic_builder_create_in_place(FYGBCF_SCHEMA_AUTO | FYGBCF_SCOPE_LEADER, NULL,
+			buf_actual, sizeof(buf_actual));
+	gb_expected = fy_generic_builder_create_in_place(FYGBCF_SCHEMA_AUTO | FYGBCF_SCOPE_LEADER, NULL,
+			buf_expected, sizeof(buf_expected));
+	ck_assert_ptr_ne(gb_actual, NULL);
+	ck_assert_ptr_ne(gb_expected, NULL);
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.parse_cfg.flags = FYPCF_DEFAULT_PARSE | FYPCF_RESOLVE_DOCUMENT |
+			      FYPCF_KEEP_COMMENTS | FYPCF_CREATE_MARKERS | FYPCF_KEEP_STYLE;
+	cfg.gb = gb_actual;
+	cfg.flags = FYGDBF_DISABLE_DIRECTORY | FYGDBF_KEEP_COMMENTS |
+		    FYGDBF_CREATE_MARKERS | FYGDBF_KEEP_STYLE;
+
+	fyp = fy_parser_create(&cfg.parse_cfg);
+	ck_assert_ptr_ne(fyp, NULL);
+	ck_assert_int_eq(fy_parser_set_string(fyp, yaml, FY_NT), 0);
+
+	fygdb = fy_generic_document_builder_create(&cfg);
+	ck_assert_ptr_ne(fygdb, NULL);
+	fy_generic_document_builder_set_in_stream(fygdb);
+
+	while ((fyep = fy_parse_private(fyp)) != NULL) {
+		if (fyep->e.type == FYET_STREAM_START) {
+			fy_parse_eventp_recycle(fyp, fyep);
+			continue;
+		}
+		rc = fy_generic_document_builder_process_event(fygdb, &fyep->e);
+		fy_parse_eventp_recycle(fyp, fyep);
+		ck_assert_int_ne(rc, -1);
+		if (fy_generic_document_builder_is_document_complete(fygdb))
+			break;
+	}
+
+	ck_assert(fy_generic_document_builder_is_document_complete(fygdb));
+	ck_assert(fy_generic_is_mapping(fy_generic_document_builder_peek_document(fygdb)));
+	actual = fy_generic_document_builder_take_document(fygdb);
+	ck_assert(fy_generic_is_mapping(actual));
+
+	expected = fy_gb_parse(gb_expected, yaml,
+			       FYOPPF_DISABLE_DIRECTORY | FYOPPF_INPUT_TYPE_STRING |
+			       FYOPPF_KEEP_COMMENTS | FYOPPF_CREATE_MARKERS | FYOPPF_KEEP_STYLE,
+			       NULL);
+	ck_assert(fy_generic_is_valid(expected));
+	ck_assert_int_eq(fy_generic_compare(actual, expected), 0);
+
+	value = fy_get(actual, "foo", fy_invalid);
+	ck_assert(fy_generic_is_valid(value));
+
+	comment = fy_generic_get_comment(value);
+	style = fy_generic_get_style(value);
+	marker = fy_generic_get_marker(value);
+	ck_assert(fy_generic_is_string(comment));
+	ck_assert(strstr(fy_cast(comment, ""), "trailing") != NULL);
+	ck_assert(fy_generic_is_int_type(style));
+	ck_assert_int_eq(fy_cast(style, -1), FYSS_DOUBLE_QUOTED);
+	ck_assert(fy_generic_is_sequence(marker));
+	ck_assert_int_eq((int)fy_len(marker), 6);
+
+	fy_generic_document_builder_destroy(fygdb);
+	fy_parser_destroy(fyp);
+}
+END_TEST
+
+START_TEST(generic_document_builder_directory_mode)
+{
+	char buf_actual[65536];
+	char buf_expected[65536];
+	struct fy_generic_builder *gb_actual, *gb_expected;
+	struct fy_generic_document_builder_cfg cfg;
+	struct fy_generic_document_builder *fygdb;
+	struct fy_parser *fyp;
+	const char *yaml = "---\nfoo: 1\n";
+	fy_generic actual_vds, expected_vds, root;
+
+	gb_actual = fy_generic_builder_create_in_place(FYGBCF_SCHEMA_AUTO | FYGBCF_SCOPE_LEADER, NULL,
+			buf_actual, sizeof(buf_actual));
+	gb_expected = fy_generic_builder_create_in_place(FYGBCF_SCHEMA_AUTO | FYGBCF_SCOPE_LEADER, NULL,
+			buf_expected, sizeof(buf_expected));
+	ck_assert_ptr_ne(gb_actual, NULL);
+	ck_assert_ptr_ne(gb_expected, NULL);
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.parse_cfg.flags = FYPCF_DEFAULT_PARSE | FYPCF_RESOLVE_DOCUMENT;
+	cfg.gb = gb_actual;
+	cfg.flags = 0;
+
+	fyp = fy_parser_create(&cfg.parse_cfg);
+	ck_assert_ptr_ne(fyp, NULL);
+	ck_assert_int_eq(fy_parser_set_string(fyp, yaml, FY_NT), 0);
+
+	fygdb = fy_generic_document_builder_create(&cfg);
+	ck_assert_ptr_ne(fygdb, NULL);
+
+	actual_vds = fy_generic_document_builder_load_document(fygdb, fyp);
+	ck_assert(fy_generic_is_valid(actual_vds));
+
+	expected_vds = fy_gb_parse(gb_expected, yaml, FYOPPF_INPUT_TYPE_STRING, NULL);
+	ck_assert(fy_generic_is_valid(expected_vds));
+	ck_assert_int_eq(fy_generic_compare(actual_vds, expected_vds), 0);
+
+	root = fy_generic_vds_get_root(actual_vds);
+	ck_assert(fy_generic_is_mapping(root));
+	ck_assert_int_eq(fy_get(root, "foo", -1), 1);
+
+	fy_generic_document_builder_destroy(fygdb);
+	fy_parser_destroy(fyp);
 }
 END_TEST
 
@@ -5540,6 +5720,9 @@ void libfyaml_case_generic(struct fy_check_suite *cs)
 
 	/* parse and emit operations */
 	fy_check_testcase_add_test(ctc, parse_emit_ops);
+	fy_check_testcase_add_test(ctc, generic_document_builder_pull_mode);
+	fy_check_testcase_add_test(ctc, generic_document_builder_push_mode_metadata);
+	fy_check_testcase_add_test(ctc, generic_document_builder_directory_mode);
 
 	/* slice operations */
 	fy_check_testcase_add_test(ctc, slice_ops);

@@ -216,7 +216,7 @@ static inline void fy_worker_signal_work_done(struct fy_thread *t, struct fy_thr
 	/* note that the work won't be replaced if it's a shutdown */
 	exp_work = work;
 	ok = fy_atomic_compare_exchange_strong(&t->work, &exp_work, NULL);
-	assert(ok);
+	assert(ok || exp_work == WORK_SHUTDOWN);
 
 	rc = fpost(&t->done);
 	assert(!rc);
@@ -1059,12 +1059,14 @@ static void *fy_worker_thread_steal(void *arg)
 			w = w_stolen;
 		}
 
-		/* unreserve first */
-		fy_thread_unreserve_internal(t);
-
 		w_exp = w_last;
-		if (!fy_atomic_compare_exchange_strong(&t->work, &w_exp, NULL))
+		/* Keep the worker reserved until its current work slot is clear. */
+		if (!fy_atomic_compare_exchange_strong(&t->work, &w_exp, NULL)) {
+			fy_thread_unreserve_internal(t);
 			break;
+		}
+
+		fy_thread_unreserve_internal(t);
 	}
 	TDBG("%s: T#%u leaving steal mode\n", __func__, t->id);
 

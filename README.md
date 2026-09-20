@@ -1,4 +1,4 @@
-# libfyaml 1.0-alpha2
+# libfyaml 1.0-alpha5
 
 [![Autotools CI](https://github.com/pantoniou/libfyaml/workflows/Standard%20Automake%20CI/badge.svg)](https://github.com/pantoniou/libfyaml/actions?query=workflow%3A%22Standard+Automake+CI%22)
 [![CMake CI](https://github.com/pantoniou/libfyaml/workflows/CMake%20CI/badge.svg)](https://github.com/pantoniou/libfyaml/actions?query=workflow%3A%22CMake+CI%22)
@@ -17,17 +17,19 @@ The alpha release adds a clear progression:
 * use generics when your problem is "work with values"
 * use reflection when your problem is "populate native C data structures"
 
-## Why 1.0-alpha2 matters
+## Why 1.0-alpha5 matters
 
-`1.0.0-alpha2` is the stabilization follow-up to `1.0.0-alpha1`.
+`1.0.0-alpha5` is the build-and-correctness follow-up to the earlier
+`1.0.0-alpha` releases.
 
-It keeps the same overall 1.0 direction, but tightens the new subsystems in the
-places that matter for early adopters:
+It keeps the same overall 1.0 direction, but expands build/test coverage and
+hardens the new subsystems in the places that matter for early adopters:
 
-* 32-bit build and runtime fixes across generics, variable-size decoding, and CMake
-* reflection fixes for LLVM 21 / libclang fallout and enum handling
-* emitter fix for literal `|+` scalar layout
-* documentation build workflow and packaging improvements for release artifacts
+* new `pcons` build system support and CI coverage
+* address-sanitized CI builds via `ENABLE_ASAN=1`
+* generic and threading fixes around `preduce` seeding and steal-mode worker shutdown/join behavior
+* parser and emitter bug fixes with expanded regression coverage
+* reflection cleanup fixes and safer no-libclang stub handling
 
 ### Generic runtime
 
@@ -277,7 +279,9 @@ python3 -m pytest tests/
 ```
 
 The binding is part of the alpha release story and shows the generic runtime's
-data model in regular use.
+data model in regular use. `v1.0.0-alpha3` improved the Windows story for the
+binding, `v1.0.0-alpha4` repaired the wheel and `sdist` packaging flow, and
+`v1.0.0-alpha5` broadens build and CI coverage around the project as a whole.
 
 ## License
 

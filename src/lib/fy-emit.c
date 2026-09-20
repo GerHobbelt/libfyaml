@@ -1231,7 +1231,7 @@ bool fy_emit_token_write_block_hints(struct fy_emitter *emit,
 	}
 
 	if (atom->starts_with_ws || atom->starts_with_lb) {
-		fy_emit_putc_simple(emit, fyewt_indicator, '0' + fy_emit_indent(emit));
+		fy_emit_printf(emit, fyewt_indicator, "%d", fy_emit_indent(emit));
 		explicit_chomp = true;
 	}
 
@@ -1499,6 +1499,10 @@ void fy_emit_token_write_folded(struct fy_emitter *emit, struct fy_token *fyt, i
 	fy_atom_iter_finish(&iter);
 }
 
+#ifndef FY_EMIT_MIN_LITERAL_LBS
+#define FY_EMIT_MIN_LITERAL_LBS 5
+#endif
+
 static enum fy_node_style
 fy_emit_token_scalar_style(struct fy_emitter *emit, struct fy_token *fyt,
 			   int flags, int indent, enum fy_node_style style,
@@ -1575,6 +1579,15 @@ fy_emit_token_scalar_style(struct fy_emitter *emit, struct fy_token *fyt,
 	/* try to pretify */
 	if (!flow && fy_emit_is_pretty_mode(emit) &&
 		(style == FYNS_ANY || style == FYNS_DOUBLE_QUOTED || style == FYNS_SINGLE_QUOTED)) {
+
+		/* can we make it a folded or literal scalar? */
+		if ((ta->flags & (FYTTAF_CAN_BE_FOLDED | FYTTAF_CAN_BE_LITERAL)) &&
+		    ta->lbs >= FY_EMIT_MIN_LITERAL_LBS) {
+
+			style = (emit->column + ta->maxcol < fy_emit_width(emit)) ?
+					FYNS_LITERAL : FYNS_FOLDED;
+			goto out;
+		}
 
 		/* any original style can be a plain, but contains linebreaks, do a literal */
 		if ((ta->flags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) == (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) {
@@ -2353,9 +2366,10 @@ int fy_emit_common_document_end(struct fy_emitter *emit, bool override_state, bo
 	fyds = emit->fyds;
 
 	implicit = fyds->end_implicit;
-	if (fyds->started_explicit)
+	if (emit->s_flags & DDNF_FORCE_EXPLICIT) {	/* force explicit */
+		emit->s_flags &= ~DDNF_FORCE_EXPLICIT;
 		implicit = false;
-	else if (override_state)
+	} else if (override_state)
 		implicit = implicit_override;
 
 	dem = ((dem_flags == FYECF_DOC_END_MARK_AUTO && !implicit) ||
@@ -3571,7 +3585,7 @@ static int fy_emit_streaming_node(struct fy_emitter *emit,
 		if ((emit->s_flags & DDNF_ROOT) && fy_emit_is_pretty_mode(emit) && !emit->column &&
 				!fy_emit_is_flow_mode(emit) && !(emit->s_flags & DDNF_FLOW)) {
 			fy_emit_document_start_indicator(emit);
-			emit->fyds->started_explicit = true;
+			emit->s_flags |= DDNF_FORCE_EXPLICIT;
 		}
 		fy_emit_common_node_preamble(emit, fye->scalar.value, fye->scalar.anchor, fye->scalar.tag, emit->s_flags, emit->s_indent);
 		style = fye->scalar.value ?

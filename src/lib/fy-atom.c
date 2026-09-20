@@ -307,7 +307,7 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 	const struct fy_atom *atom = iter->atom;
 	const char *s, *e, *ss;
 	int col, c, cn, w, wn, ts, cws, advws;
-	bool last_was_ws, is_block;
+	bool last_was_ws, is_block, can_be_nws_end;
 	int lastc;
 
 	s = line_start;
@@ -417,6 +417,11 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 				cws = 0;
 				li->nws_end = ss;
 				last_was_ws = true;
+#if defined(DEBUG_CHUNK)
+				fprintf(stderr, "%s:%d last_was_ws=%s nws='%.*s'\n", __FILE__, __LINE__,
+						last_was_ws ? "true" : "false",
+						(int)(li->nws_end - li->nws_start), li->nws_start);
+#endif
 			}
 
 #if defined(DEBUG_CHUNK)
@@ -435,14 +440,31 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 			col++;
 			cws++;
 
-			if (!last_was_ws) {
+			can_be_nws_end = true;
+#ifdef DEBUG_CHUNK
+			if (atom->style == FYAS_DOUBLE_QUOTED) {
+				fprintf(stderr, "%s:%d \" ss[-1]=%d\n", __FILE__, __LINE__, ss[-1]);
+			}
+#endif
+
+			if (atom->style == FYAS_DOUBLE_QUOTED && ss > li->start && ss[-1] == '\\') {
+				can_be_nws_end = false;
+#ifdef DEBUG_CHUNK
+				fprintf(stderr, "%s:%d backslashed space\n", __FILE__, __LINE__);
+#endif
+			}
+
+			if (can_be_nws_end && !last_was_ws) {
 				li->nws_end = ss;
 				last_was_ws = true;
+#if defined(DEBUG_CHUNK)
+				fprintf(stderr, "%s:%d last_was_ws=%s nws='%.*s'\n", __FILE__, __LINE__,
+						last_was_ws ? "true" : "false",
+						(int)(li->nws_end - li->nws_start), li->nws_start);
+#endif
 			}
 
 		} else if (fy_is_tab(c)) {
-
-			bool can_be_nws_end;
 
 			advws = ts - (col % ts);
 			col += advws;
@@ -471,6 +493,11 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 			if (can_be_nws_end && !last_was_ws) {
 				li->nws_end = ss;
 				last_was_ws = true;
+#if defined(DEBUG_CHUNK)
+				fprintf(stderr, "%s:%d last_was_ws=%s nws='%.*s'\n", __FILE__, __LINE__,
+						last_was_ws ? "true" : "false",
+						(int)(li->nws_end - li->nws_start), li->nws_start);
+#endif
 			}
 
 		} else {
@@ -546,6 +573,9 @@ do_nws:
 			last_was_ws = true;
 #ifdef DEBUG_CHUNK
 			fprintf(stderr, "%s:%d li->final && atom->ends_with_eof && !last_was_ws\n", __FILE__, __LINE__);
+			fprintf(stderr, "%s:%d last_was_ws=%s nws='%.*s'\n", __FILE__, __LINE__,
+					last_was_ws ? "true" : "false",
+					(int)(li->nws_end - li->nws_start), li->nws_start);
 #endif
 		}
 	}
@@ -558,6 +588,12 @@ do_nws:
 
 	if (!li->nws_end)
 		li->nws_end = ss;
+
+#if defined(DEBUG_CHUNK)
+	fprintf(stderr, "%s:%d last_was_ws=%s nws='%.*s'\n", __FILE__, __LINE__,
+			last_was_ws ? "true" : "false",
+			(int)(li->nws_end - li->nws_start), li->nws_start);
+#endif
 
 	/* if we haven't hit the chomp, point use whatever we're now */
 	if (is_block && !li->chomp_start) {
@@ -1241,6 +1277,7 @@ const char *fy_atom_format_text(struct fy_atom *atom, char *buf, size_t maxsz)
 	const struct fy_iter_chunk *ic;
 	char *s, *e;
 	int ret;
+	int count = 0;
 
 	if (!atom || !buf)
 		return NULL;
@@ -1255,8 +1292,12 @@ const char *fy_atom_format_text(struct fy_atom *atom, char *buf, size_t maxsz)
 			ret = -1;
 			break;
 		}
+		assert(ic->len > 0);
 		memcpy(s, ic->str, ic->len);
 		s += ic->len;
+		count++;
+		if (count > 100)
+			FY_IMPOSSIBLE_ABORT();
 	}
 	fy_atom_iter_finish(&iter);
 
@@ -1970,18 +2011,22 @@ const char *fy_atom_lines_containing(struct fy_atom *atom, size_t *lenp)
 }
 
 unsigned int
-fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxspanp, int *maxcolp)
+fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style,
+		     int *maxspanp, int *maxcolp, int *lbsp)
 {
 	unsigned int flags = 0;
 	int c, cn, cnn, cp, col;
 	uint8_t col0si, col0ei;	/* mask for --- ... at indent 0 */
-	int span, maxspan, maxcol;
+	int span, maxspan, maxcol, lbs = 0;
 	struct fy_atom_iter iter;
+	bool ws_run_has_tab;
 
 	if (maxspanp)
 		*maxspanp = 0;
 	if (maxcolp)
 		*maxcolp = 0;
+	if (lbsp)
+		*lbsp = 0;
 
 	flags = FYTTAF_TEXT_TOKEN;
 
@@ -2021,6 +2066,7 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 	maxcol = 0;
 	maxspan = 0;
 	span = 0;
+	lbs = 0;
 
 	/* get first character */
 	cn = fy_atom_iter_utf8_get(&iter);
@@ -2042,9 +2088,6 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 		 FYTTAF_EMPTY;
 
 	col0si = col0ei = 0;
-
-	/* disable folded right off the bat, it's a pain */
-	flags &= ~FYTTAF_CAN_BE_FOLDED;
 
 	/* plain scalars can't start with any indicator (or space/lb) */
 	if ((flags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW))) {
@@ -2075,6 +2118,7 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 			   FYTTAF_CAN_BE_PLAIN_FLOW);
 	}
 
+	ws_run_has_tab = false;
 	cp = -1;
 	for (c = cn; c >= 0; cp = c, c = cn) {
 
@@ -2095,6 +2139,7 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 
 		/* zero can't be output, only in double quoted mode */
 		if (c == 0) {
+
 			flags &= ~(FYTTAF_DIRECT_OUTPUT |
 				   FYTTAF_CAN_BE_PLAIN |
 				   FYTTAF_CAN_BE_SINGLE_QUOTED |
@@ -2107,7 +2152,11 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 			flags |= FYTTAF_CAN_BE_DOUBLE_QUOTED;
 			flags &= ~FYTTAF_EMPTY;
 			flags |= FYTTAF_HAS_ZERO;
+
 		} else if (fy_is_ws(c)) {
+
+			/* track if the ws run has a tab */
+			ws_run_has_tab = fy_is_tab(c);
 
 			flags |= FYTTAF_HAS_WS;
 			if (fy_is_ws(cn)) {
@@ -2122,6 +2171,11 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 			flags &= ~FYTTAF_ALL_PRINT_ASCII;
 
 		} else if (fy_atom_is_lb(handle, c)) {
+
+			/* if there was a tab before linebreak, we can't be single quoted */
+			if (style == FYAS_SINGLE_QUOTED_MANUAL && ws_run_has_tab)
+				flags &= ~FYTTAF_CAN_BE_SINGLE_QUOTED;
+			ws_run_has_tab = false;
 
 			flags |= FYTTAF_HAS_LB;
 			if (fy_atom_is_lb(handle, cn))
@@ -2145,6 +2199,7 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 			/* out of our comfort zone */
 			if (c < '!' || c > '~')
 				flags &= ~FYTTAF_ALL_PRINT_ASCII;
+			ws_run_has_tab = false;
 		}
 
 		if ((flags & FYTTAF_CAN_BE_UNQUOTED_PATH_KEY) && !fy_is_alnum(c))
@@ -2166,7 +2221,7 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 			flags &= ~FYTTAF_CAN_BE_PLAIN_FLOW;
 
 		/* non printable characters, turn off these styles */
-		if (!fy_is_print(c)) {
+		if (!fy_is_print(c) && c != '\t') {
 			flags &= ~(FYTTAF_CAN_BE_SINGLE_QUOTED | FYTTAF_CAN_BE_LITERAL |
 				   FYTTAF_CAN_BE_FOLDED);
 			flags |= FYTTAF_HAS_NON_PRINT;
@@ -2191,6 +2246,7 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 				maxcol = col;
 			col = 0;
 			col0si = col0ei = 0;
+			lbs++;
 		} else
 			col++;
 
@@ -2206,6 +2262,12 @@ fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxs
 				if (c == ':')
 					flags |= FYTTAF_ENDS_WITH_COLON;
 			}
+
+			/* if there was a tab before linebreak, we can't be single quoted */
+			if (style == FYAS_SINGLE_QUOTED_MANUAL && ws_run_has_tab)
+				flags &= ~FYTTAF_CAN_BE_SINGLE_QUOTED;
+			ws_run_has_tab = false;
+
 		}
 	}
 
@@ -2228,5 +2290,7 @@ done:
 		*maxspanp = maxspan;
 	if (maxcolp)
 		*maxcolp = maxcol;
+	if (lbsp)
+		*lbsp = lbs;
 	return flags;
 }

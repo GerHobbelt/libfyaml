@@ -25,6 +25,7 @@ def resolve_repo_root() -> Path:
     if env_root:
         candidates.append(Path(env_root))
 
+    candidates.append(THIS_DIR)
     candidates.append(THIS_DIR.parent)
 
     for candidate in candidates:
@@ -117,7 +118,7 @@ def generic_platform_supported() -> bool:
 
 def base_compile_args(compiler_type: Optional[str]) -> List[str]:
     if compiler_type == "msvc":
-        return ["/W3", "/wd4100"]
+        return ["/W3", "/wd4100", "/Zc:preprocessor", "/clang:-fno-ms-compatibility"]
 
     args = ["-Wall", "-Wextra", "-Wno-unused-parameter"]
     if sys.platform != "win32":
@@ -170,6 +171,10 @@ class CustomBuildExt(build_ext):
                 "little-endian targets"
             )
 
+        if sys.platform == "win32":
+            self._build_windows_extension_with_cmake(ext)
+            return
+
         compiler_type = getattr(self.compiler, "compiler_type", None)
         if not windows_compiler_supported(compiler_type, self.compiler):
             raise RuntimeError(
@@ -187,6 +192,48 @@ class CustomBuildExt(build_ext):
         ext.extra_link_args = build_info["extra_link_args"]
 
         super().build_extension(ext)
+
+    def _build_windows_extension_with_cmake(self, ext: Extension) -> None:
+        build_dir = Path(self.build_temp) / "libfyaml-python"
+        if build_dir.exists():
+            shutil.rmtree(build_dir)
+
+        cmake_args = [
+            "cmake",
+            "-S",
+            str(REPO_ROOT),
+            "-B",
+            str(build_dir),
+            "-DBUILD_SHARED_LIBS=OFF",
+            "-DBUILD_TESTING=OFF",
+            "-DENABLE_NETWORK=OFF",
+            "-DENABLE_PYTHON_BINDINGS=ON",
+            "-DENABLE_REFLECTION=OFF",
+            "-DENABLE_LIBCLANG=OFF",
+            "-DENABLE_PORTABLE_TARGET=ON",
+            "-DCMAKE_BUILD_TYPE=Release",
+            f"-DPython3_EXECUTABLE={sys.executable}",
+        ]
+
+        if "CMAKE_GENERATOR" not in os.environ and shutil.which("ninja"):
+            cmake_args.extend(["-G", "Ninja"])
+
+        extra_cmake_args = os.environ.get("LIBFYAML_CMAKE_ARGS")
+        if extra_cmake_args:
+            cmake_args.extend(shlex.split(extra_cmake_args))
+
+        run_command(cmake_args)
+        run_command(
+            ["cmake", "--build", str(build_dir), "--config", "Release", "--target", "_libfyaml"]
+        )
+
+        built_extensions = sorted((build_dir / "python-libfyaml" / "libfyaml").glob("_libfyaml*.pyd"))
+        if not built_extensions:
+            raise RuntimeError("CMake did not produce a Windows _libfyaml extension")
+
+        destination = Path(self.get_ext_fullpath(ext.name))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(built_extensions[0], destination)
 
     def _resolve_libfyaml_build(self, compiler_type: Optional[str]) -> Dict[str, List[str]]:
         if os.environ.get("LIBFYAML_USE_SYSTEM") == "1":

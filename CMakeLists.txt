@@ -253,6 +253,19 @@ endif()
 # When cross-compiling with wine we skip find_package/pkg-config (those would
 # find host libraries) and go straight to FetchContent so check is built for
 # the target platform.
+function(fy_target_compile_definition_if_exists _target_name)
+    if(NOT TARGET ${_target_name})
+        return()
+    endif()
+
+    get_target_property(_aliased_target ${_target_name} ALIASED_TARGET)
+    if(_aliased_target)
+        set(_target_name ${_aliased_target})
+    endif()
+
+    target_compile_definitions(${_target_name} PRIVATE _CRT_SECURE_NO_WARNINGS)
+endfunction()
+
 set(HAVE_CHECK 0)
 set(HAVE_COMPATIBLE_CHECK 0)
 if(BUILD_TESTING AND (NOT CMAKE_CROSSCOMPILING OR HAVE_WINE))
@@ -316,6 +329,12 @@ if(BUILD_TESTING AND (NOT CMAKE_CROSSCOMPILING OR HAVE_WINE))
             set(HAVE_CLOCK_GETTIME 1 CACHE INTERNAL "" FORCE)
         endif()
         FetchContent_MakeAvailable(check)
+        if(WIN32)
+            fy_target_compile_definition_if_exists(check)
+            fy_target_compile_definition_if_exists(Check::check)
+            fy_target_compile_definition_if_exists(checkShared)
+            fy_target_compile_definition_if_exists(Check::checkShared)
+        endif()
         if(TARGET checkShared)
             # check unconditionally creates a checkShared SHARED target alongside
             # the static check target. We only need the static library; exclude the
@@ -964,6 +983,7 @@ set(LIBSRCS
 if(HAVE_GENERIC)
     list(APPEND LIBSRCS
         src/generic/fy-generic.c
+        src/generic/fy-generic-docbuilder.c
         src/generic/fy-generic-decoder.c
         src/generic/fy-generic-encoder.c
         src/generic/fy-generic-op.c
@@ -1270,8 +1290,10 @@ endif()
 
 set_target_properties(fyaml PROPERTIES
     OUTPUT_NAME fyaml
-    VERSION ${PROJECT_VERSION}
-    SOVERSION ${VERSION_MAJOR}
+    # Keep package/project versioning on PROJECT_VERSION, but derive the
+    # shared-library ABI version from .libtool-version for CMake builds too.
+    VERSION ${SO_VERSION_FULL}
+    SOVERSION ${SO_VERSION}
     FOLDER "Libraries"
     PUBLIC_HEADER "include/libfyaml.h"
 )
@@ -1553,7 +1575,7 @@ if(CAN_TEST)
             test/libfyaml-test-thread.c
             $<$<BOOL:${HAVE_GENERIC}>:test/libfyaml-test-generic.c>
             $<$<BOOL:${HAVE_GENERIC}>:test/libfyaml-test-generic-scalars.c>
-			$<$<BOOL:${HAVE_REFLECTION}>:test/libfyaml-test-reflection.c>
+            $<$<BOOL:${HAVE_REFLECTION}>:test/libfyaml-test-reflection.c>
             ${GETOPT_SOURCES}
         )
 
@@ -1875,16 +1897,24 @@ install(
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tags.cmake)
 
 # Python core bindings
-find_package(Python3 COMPONENTS Interpreter Development.Module)
-if(Python3_FOUND)
+if(NOT CMAKE_CROSSCOMPILING)
+    find_package(Python3 COMPONENTS Interpreter Development.Module)
+endif()
+if(CMAKE_CROSSCOMPILING)
+    set(_ENABLE_PYTHON_BINDINGS_DEFAULT OFF)
+elseif(Python3_FOUND)
     set(_ENABLE_PYTHON_BINDINGS_DEFAULT ON)
 else()
     set(_ENABLE_PYTHON_BINDINGS_DEFAULT OFF)
 endif()
 option(ENABLE_PYTHON_BINDINGS "Build Python core bindings (_libfyaml extension)" ${_ENABLE_PYTHON_BINDINGS_DEFAULT})
 
-if(WIN32 AND ENABLE_PYTHON_BINDINGS AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    message(FATAL_ERROR "Windows Python bindings require Clang/clang-cl because libfyaml generics depend on statement expressions")
+if(CMAKE_CROSSCOMPILING AND ENABLE_PYTHON_BINDINGS)
+    message(STATUS "Python bindings disabled (cross-compiling requires a target Python SDK, which is not auto-detected)")
+    set(HAVE_PYTHON_BINDINGS 0)
+elseif(WIN32 AND ENABLE_PYTHON_BINDINGS AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    message(STATUS "Python bindings disabled (windows requires clang/clang-cl)")
+    set(HAVE_PYTHON_BINDINGS 0)
 elseif(ENABLE_PYTHON_BINDINGS AND NOT HAVE_GENERIC)
     message(STATUS "Python bindings disabled (requires statement expressions / generic support)")
     set(HAVE_PYTHON_BINDINGS 0)
@@ -1892,54 +1922,46 @@ elseif(ENABLE_PYTHON_BINDINGS)
     if(NOT Python3_FOUND)
         message(FATAL_ERROR "Python3 development headers not found (required for ENABLE_PYTHON_BINDINGS)")
     endif()
+    if(WIN32
+            AND CMAKE_BUILD_TYPE STREQUAL "Debug"
+            AND (NOT DEFINED Python3_LIBRARY_DEBUG OR Python3_LIBRARY_DEBUG MATCHES "-NOTFOUND$"))
+        message(STATUS "Python bindings disabled (windows Debug build requires matching Python debug import library)")
+        set(HAVE_PYTHON_BINDINGS 0)
+    else()
 
-    Python3_add_library(_libfyaml MODULE WITH_SOABI
-        "${CMAKE_CURRENT_SOURCE_DIR}/python-libfyaml/libfyaml/_libfyaml.c"
-    )
-    target_include_directories(_libfyaml PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${CMAKE_CURRENT_BINARY_DIR}"
-    )
-    target_link_libraries(_libfyaml PRIVATE fyaml_static)
-    target_compile_options(_libfyaml PRIVATE ${COMMON_C_FLAGS})
-    if(WIN32 AND (NOT DEFINED Python3_LIBRARY_DEBUG OR Python3_LIBRARY_DEBUG MATCHES "-NOTFOUND$"))
-        message(STATUS "Python3 debug library not found; building _libfyaml without _DEBUG against release Python")
-        if(TARGET Python3::Python)
-            set_property(TARGET Python3::Python PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
+        Python3_add_library(_libfyaml MODULE WITH_SOABI
+            "${CMAKE_CURRENT_SOURCE_DIR}/python-libfyaml/libfyaml/_libfyaml.c"
+        )
+        target_include_directories(_libfyaml PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_BINARY_DIR}"
+        )
+        target_link_libraries(_libfyaml PRIVATE fyaml_static)
+        target_compile_options(_libfyaml PRIVATE ${COMMON_C_FLAGS})
+        if(HAVE_ASAN)
+            target_compile_options(_libfyaml PRIVATE ${ASAN_C_FLAGS})
+            target_link_options(_libfyaml PRIVATE ${ASAN_C_FLAGS})
         endif()
-        if(TARGET Python3::Module)
-            set_property(TARGET Python3::Module PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
-        endif()
-        set_property(TARGET _libfyaml PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-        if(MSVC)
-            target_compile_options(_libfyaml PRIVATE $<$<CONFIG:Debug>:/U_DEBUG>)
-        else()
-            target_compile_options(_libfyaml PRIVATE $<$<CONFIG:Debug>:-U_DEBUG>)
-        endif()
+        # Place the .so in the build tree, not the source tree
+        set(_PY_PKG_SRC "${CMAKE_CURRENT_SOURCE_DIR}/python-libfyaml/libfyaml")
+        set(_PY_PKG_DST "${CMAKE_CURRENT_BINARY_DIR}/python-libfyaml/libfyaml")
+        set_target_properties(_libfyaml PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${_PY_PKG_DST}"
+            RUNTIME_OUTPUT_DIRECTORY "${_PY_PKG_DST}"
+            PREFIX ""
+        )
+        # Link/copy source files into the build staging dir so the complete
+        # package is importable directly from the build tree.
+        # COPY_ON_ERROR makes this work on Windows where symlinks may be
+        # unavailable (requires Developer Mode or admin rights).
+        file(MAKE_DIRECTORY "${_PY_PKG_DST}")
+        file(GLOB _py_srcs "${_PY_PKG_SRC}/*.py" "${_PY_PKG_SRC}/*.pyi")
+        foreach(_src ${_py_srcs})
+            get_filename_component(_name "${_src}" NAME)
+            file(CREATE_LINK "${_src}" "${_PY_PKG_DST}/${_name}" SYMBOLIC COPY_ON_ERROR)
+        endforeach()
+        set(HAVE_PYTHON_BINDINGS 1)
     endif()
-    if(HAVE_ASAN)
-        target_compile_options(_libfyaml PRIVATE ${ASAN_C_FLAGS})
-        target_link_options(_libfyaml PRIVATE ${ASAN_C_FLAGS})
-    endif()
-    # Place the .so in the build tree, not the source tree
-    set(_PY_PKG_SRC "${CMAKE_CURRENT_SOURCE_DIR}/python-libfyaml/libfyaml")
-    set(_PY_PKG_DST "${CMAKE_CURRENT_BINARY_DIR}/python-libfyaml/libfyaml")
-    set_target_properties(_libfyaml PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${_PY_PKG_DST}"
-        RUNTIME_OUTPUT_DIRECTORY "${_PY_PKG_DST}"
-        PREFIX ""
-    )
-    # Link/copy source files into the build staging dir so the complete
-    # package is importable directly from the build tree.
-    # COPY_ON_ERROR makes this work on Windows where symlinks may be
-    # unavailable (requires Developer Mode or admin rights).
-    file(MAKE_DIRECTORY "${_PY_PKG_DST}")
-    file(GLOB _py_srcs "${_PY_PKG_SRC}/*.py" "${_PY_PKG_SRC}/*.pyi")
-    foreach(_src ${_py_srcs})
-        get_filename_component(_name "${_src}" NAME)
-        file(CREATE_LINK "${_src}" "${_PY_PKG_DST}/${_name}" SYMBOLIC COPY_ON_ERROR)
-    endforeach()
-    set(HAVE_PYTHON_BINDINGS 1)
 else()
     set(HAVE_PYTHON_BINDINGS 0)
 endif()
